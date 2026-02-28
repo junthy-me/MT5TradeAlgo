@@ -31,18 +31,14 @@ input PointValueTypeEnum InpPointValueType = KMax;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
-input double InpCondBYMin = 0.75;
-input double InpCondBYMax = 1.25;
+input double InpRatioC = 0.4;
 input double InpCondCZ = 1.0;
-input double InpCondDM = 2.0;
 input int InpTSpanMinConf = 5;
 
-input double InpHardLossC = 1.0;
 input double InpSoftLossN = 0.5;
 input double InpSoftLossC = 1.0;
-input double InpProfitC = 2.0;
-input double NoiseFilter_aValueCompBuyPricePercent = 1.0;
-input double NoiseFilter_maxBValueCompAValueProd = 1.5;
+input double InpProfitC = 1.8;
+input double NoiseFilter_bSumValueCompBuyPricePercent = 0.5;
 input bool InpEnableExactSearchCompare = false;
 
 struct PatternSnapshot
@@ -79,8 +75,8 @@ struct PatternSnapshot
    double            softLossPrice;
    double            profitPrice;
    double            noiseFilterBuyPrice;
-   double            noiseFilterAValuePercent;
-   double            noiseFilterMaxBValue;
+   double            noiseFilterBSumPercent;
+   double            noiseFilterBSumValue;
   };
 
 struct SymbolRuntimeState
@@ -171,15 +167,15 @@ bool ValidateInputs()
       return(false);
      }
 
-   if(InpCondBYMin <= 0.0 || InpCondBYMax <= 0.0 || InpCondBYMin > InpCondBYMax)
+   if(InpRatioC < 0.0)
      {
-      Print("Invalid CondB range.");
+      Print("Invalid CondB ratio threshold.");
       return(false);
      }
 
-   if(NoiseFilter_aValueCompBuyPricePercent < 0.0 || NoiseFilter_maxBValueCompAValueProd < 0.0)
+   if(NoiseFilter_bSumValueCompBuyPricePercent < 0.0)
      {
-      Print("Invalid noise filter thresholds.");
+      Print("Invalid noise filter threshold.");
       return(false);
      }
 
@@ -599,20 +595,21 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
    pattern.t[3] = MinutesBetween(pattern.pointTimes[3], pattern.pointTimes[4]);
    pattern.triggerPatternTotalTimeMinute = pattern.t[0] + pattern.t[1] + pattern.t[2] + pattern.t[3];
 
-   pattern.condB = (pattern.r2 > 0.0) ? InRange(pattern.r1 / pattern.r2, InpCondBYMin, InpCondBYMax) : false;
+   pattern.condB = pattern.r1 >= InpRatioC;
    pattern.condC = pattern.t[3] < (InpCondCZ * (pattern.t[0] + pattern.t[1] + pattern.t[2]));
-   pattern.condD = pattern.c < (InpCondDM * pattern.a);
+   pattern.condD = true;
 
-   if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condD && pattern.condE && pattern.condF))
+   if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condE && pattern.condF))
      {
       ResetPattern(pattern);
       return(false);
      }
 
    pattern.referenceEntryPrice = pattern.pointPrices[4];
-   pattern.hardLossPrice = NormalizePrice(pattern.symbol, pattern.referenceEntryPrice - InpHardLossC * pattern.a);
+   pattern.hardLossPrice = pattern.pointPrices[0];
    pattern.softLossPrice = 0.0;
-   pattern.profitPrice = NormalizePrice(pattern.symbol, pattern.referenceEntryPrice + InpProfitC * pattern.a);
+   pattern.profitPrice = NormalizePrice(pattern.symbol,
+                                        pattern.referenceEntryPrice + InpProfitC * (pattern.b1 + pattern.b2 + pattern.a));
    return(true);
   }
 
@@ -804,8 +801,8 @@ void ResetPattern(PatternSnapshot &pattern)
    pattern.softLossPrice = 0.0;
    pattern.profitPrice = 0.0;
    pattern.noiseFilterBuyPrice = 0.0;
-   pattern.noiseFilterAValuePercent = 0.0;
-   pattern.noiseFilterMaxBValue = 0.0;
+   pattern.noiseFilterBSumPercent = 0.0;
+   pattern.noiseFilterBSumValue = 0.0;
   }
 
 double MinutesBetween(const datetime fromTime, const datetime toTime)
@@ -947,31 +944,28 @@ void ExecuteEntry(PatternSnapshot &pattern)
 bool EvaluateNoiseFilters(PatternSnapshot &pattern, const double buyPrice)
   {
    pattern.noiseFilterBuyPrice = NormalizePrice(pattern.symbol, buyPrice);
-   pattern.noiseFilterAValuePercent = (buyPrice > 0.0) ? (pattern.a / buyPrice) * 100.0 : 0.0;
-   pattern.noiseFilterMaxBValue = MathMax(pattern.b1, pattern.b2);
-   pattern.condG = pattern.noiseFilterAValuePercent >= NoiseFilter_aValueCompBuyPricePercent;
-   pattern.condH = pattern.noiseFilterMaxBValue >= (NoiseFilter_maxBValueCompAValueProd * pattern.a);
-   return(pattern.condG && pattern.condH);
+   pattern.noiseFilterBSumValue = pattern.b1 + pattern.b2;
+   pattern.noiseFilterBSumPercent = (buyPrice > 0.0) ? (pattern.noiseFilterBSumValue / buyPrice) * 100.0 : 0.0;
+   pattern.condG = true;
+   pattern.condH = pattern.noiseFilterBSumPercent >= NoiseFilter_bSumValueCompBuyPricePercent;
+   return(pattern.condH);
   }
 
 void LogNoiseFilterBlocked(const PatternSnapshot &pattern)
   {
    string failedConditions = "";
-   if(!pattern.condG)
-      failedConditions = "CondG";
    if(!pattern.condH)
-      failedConditions = (failedConditions == "") ? "CondH" : failedConditions + ",CondH";
+      failedConditions = "CondH";
 
    PrintFormat("ENTRY_FILTER_BLOCKED symbol=%s failed=%s source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime "
-               "buy_price=%.5f a=%.5f a_buy_pct=%.5f threshold_pct=%.5f max_b=%.5f threshold_b=%.5f b1=%.5f b2=%.5f",
+               "buy_price=%.5f a=%.5f b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f b1=%.5f b2=%.5f",
                pattern.symbol,
                failedConditions,
                pattern.noiseFilterBuyPrice,
                pattern.a,
-               pattern.noiseFilterAValuePercent,
-               NoiseFilter_aValueCompBuyPricePercent,
-               pattern.noiseFilterMaxBValue,
-               NoiseFilter_maxBValueCompAValueProd * pattern.a,
+               pattern.noiseFilterBSumValue,
+               pattern.noiseFilterBSumPercent,
+               NoiseFilter_bSumValueCompBuyPricePercent,
                pattern.b1,
                pattern.b2);
   }
@@ -1231,7 +1225,7 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
 void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const string orderComment, const ulong ticket)
   {
    PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
-               "noise_buy=%.5f condG=%s a_buy_pct=%.5f threshold_pct=%.5f condH=%s max_b=%.5f threshold_b=%.5f "
+               "noise_buy=%.5f condB=%s r1=%.5f threshold_r1=%.5f condH=%s b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f "
                "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime,P5:Low,P6:High "
                "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f) "
                "a=%.5f b1=%.5f b2=%.5f c=%.5f r1=%.5f r2=%.5f t1=%.2f t2=%.2f t3=%.2f t4=%.2f total=%.2f",
@@ -1243,12 +1237,13 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                pattern.hardLossPrice,
                pattern.profitPrice,
                pattern.noiseFilterBuyPrice,
-               pattern.condG ? "true" : "false",
-               pattern.noiseFilterAValuePercent,
-               NoiseFilter_aValueCompBuyPricePercent,
+               pattern.condB ? "true" : "false",
+               pattern.r1,
+               InpRatioC,
                pattern.condH ? "true" : "false",
-               pattern.noiseFilterMaxBValue,
-               NoiseFilter_maxBValueCompAValueProd * pattern.a,
+               pattern.noiseFilterBSumValue,
+               pattern.noiseFilterBSumPercent,
+               NoiseFilter_bSumValueCompBuyPricePercent,
                FormatTime(pattern.pointTimes[0]),
                pattern.pointPrices[0],
                FormatTime(pattern.pointTimes[1]),
