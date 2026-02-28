@@ -46,6 +46,7 @@ struct PatternSnapshot
    bool              valid;
    string            symbol;
    int               pointIndexes[PATTERN_POINT_COUNT];
+   datetime          p4BarTime;
    datetime          pointTimes[PATTERN_POINT_COUNT];
    double            pointPrices[PATTERN_POINT_COUNT];
    int               pointSpans[PATTERN_SEGMENT_COUNT];
@@ -79,6 +80,12 @@ struct PatternSnapshot
    double            noiseFilterBSumValue;
   };
 
+struct BackboneSuccessState
+  {
+   datetime          pointTimes[4];
+   datetime          successfulP4BarTime;
+  };
+
 struct SymbolRuntimeState
   {
    string            symbol;
@@ -89,6 +96,9 @@ struct SymbolRuntimeState
    PatternSnapshot   historyCandidates[];
    datetime          lastEvaluatedP4Time;
    double            lastEvaluatedP4Price;
+   datetime          lastSuccessfulEntryBarTime;
+   int               backboneSuccessCount;
+   BackboneSuccessState backboneSuccesses[];
   };
 
 struct ManagedPositionState
@@ -245,12 +255,18 @@ void ProcessSymbol(const string symbol)
    if(!SymbolInfoTick(symbol, tick) || tick.ask <= 0.0)
       return;
 
+   const datetime currentBarTime = GetCurrentBarOpenTime(symbol);
+   if(currentBarTime <= 0)
+      return;
+
    const bool hasCachedMatch = EvaluateCachedRealtimePattern(g_symbolStates[stateIndex], tick, match);
    if(InpEnableExactSearchCompare)
       CompareCachedAndLegacySearch(g_symbolStates[stateIndex], tick, hasCachedMatch, match);
 
    if(!hasCachedMatch)
       return;
+
+   match.p4BarTime = currentBarTime;
 
    if(match.pointTimes[4] <= g_symbolStates[stateIndex].lastEvaluatedP4Time &&
       match.pointPrices[4] == g_symbolStates[stateIndex].lastEvaluatedP4Price)
@@ -259,13 +275,30 @@ void ProcessSymbol(const string symbol)
    g_symbolStates[stateIndex].lastEvaluatedP4Time = match.pointTimes[4];
    g_symbolStates[stateIndex].lastEvaluatedP4Price = match.pointPrices[4];
 
-   if(CountManagedPositions(symbol) >= InpMaxPositionsPerSymbol)
+   if(IsP4BarLocked(g_symbolStates[stateIndex], currentBarTime))
      {
-      PrintFormat("Entry blocked by position limit. symbol=%s limit=%d", symbol, InpMaxPositionsPerSymbol);
+      LogEntryBlockedByP4Bar(symbol, currentBarTime);
       return;
      }
 
-   ExecuteEntry(match);
+   datetime successfulBackboneP4BarTime = 0;
+   if(IsBackboneSuccessLocked(g_symbolStates[stateIndex], match, successfulBackboneP4BarTime))
+     {
+      LogEntryBlockedByBackboneSuccess(match, successfulBackboneP4BarTime);
+      return;
+     }
+
+   if(CountManagedPositions(symbol) >= InpMaxPositionsPerSymbol)
+     {
+      PrintFormat("Entry blocked by position limit. symbol=%s timeframe=%s p4_bar=%s limit=%d",
+                  symbol,
+                  EnumToString(InpTF),
+                  FormatTime(currentBarTime),
+                  InpMaxPositionsPerSymbol);
+      return;
+     }
+
+   ExecuteEntry(g_symbolStates[stateIndex], match);
   }
 
 bool EnsureSymbolReady(const string symbol)
@@ -300,6 +333,118 @@ double NormalizePrice(const string symbol, const double price)
   {
    const int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
    return(NormalizeDouble(price, digits));
+  }
+
+datetime GetCurrentBarOpenTime(const string symbol)
+  {
+   return(iTime(symbol, InpTF, 0));
+  }
+
+bool IsP4BarLocked(const SymbolRuntimeState &state, const datetime currentBarTime)
+  {
+   return(currentBarTime > 0 && state.lastSuccessfulEntryBarTime == currentBarTime);
+  }
+
+void LogEntryBlockedByP4Bar(const string symbol, const datetime currentBarTime)
+  {
+   PrintFormat("Entry blocked by P4 bar lock. symbol=%s timeframe=%s p4_bar=%s",
+               symbol,
+               EnumToString(InpTF),
+               FormatTime(currentBarTime));
+  }
+
+void ResetBackboneSuccesses(SymbolRuntimeState &state)
+  {
+   state.backboneSuccessCount = 0;
+   ArrayResize(state.backboneSuccesses, 0);
+  }
+
+void RemoveBackboneSuccess(SymbolRuntimeState &state, const int index)
+  {
+   const int last = state.backboneSuccessCount - 1;
+   if(index < 0 || index > last)
+      return;
+
+   for(int i = index; i < last; ++i)
+      state.backboneSuccesses[i] = state.backboneSuccesses[i + 1];
+
+   state.backboneSuccessCount--;
+   ArrayResize(state.backboneSuccesses, state.backboneSuccessCount);
+  }
+
+void PruneBackboneSuccesses(SymbolRuntimeState &state, const datetime oldestRetainedBarTime)
+  {
+   if(oldestRetainedBarTime <= 0)
+      return;
+
+   for(int i = state.backboneSuccessCount - 1; i >= 0; --i)
+     {
+      if(state.backboneSuccesses[i].pointTimes[3] < oldestRetainedBarTime)
+         RemoveBackboneSuccess(state, i);
+     }
+  }
+
+int FindBackboneSuccess(const SymbolRuntimeState &state, const PatternSnapshot &pattern)
+  {
+   for(int i = 0; i < state.backboneSuccessCount; ++i)
+     {
+      if(state.backboneSuccesses[i].pointTimes[0] == pattern.pointTimes[0] &&
+         state.backboneSuccesses[i].pointTimes[1] == pattern.pointTimes[1] &&
+         state.backboneSuccesses[i].pointTimes[2] == pattern.pointTimes[2] &&
+         state.backboneSuccesses[i].pointTimes[3] == pattern.pointTimes[3])
+         return(i);
+     }
+   return(-1);
+  }
+
+void MarkBackboneSuccess(SymbolRuntimeState &state,
+                         const PatternSnapshot &pattern,
+                         const datetime successfulP4BarTime)
+  {
+   const int existing = FindBackboneSuccess(state, pattern);
+   if(existing >= 0)
+     {
+      state.backboneSuccesses[existing].successfulP4BarTime = successfulP4BarTime;
+      return;
+     }
+
+   const int index = state.backboneSuccessCount;
+   if(ArrayResize(state.backboneSuccesses, index + 1) < index + 1)
+      return;
+
+   for(int i = 0; i < 4; ++i)
+      state.backboneSuccesses[index].pointTimes[i] = pattern.pointTimes[i];
+   state.backboneSuccesses[index].successfulP4BarTime = successfulP4BarTime;
+   state.backboneSuccessCount++;
+  }
+
+bool IsBackboneSuccessLocked(const SymbolRuntimeState &state,
+                             const PatternSnapshot &pattern,
+                             datetime &successfulBackboneP4BarTime)
+  {
+   const int existing = FindBackboneSuccess(state, pattern);
+   if(existing < 0)
+     {
+      successfulBackboneP4BarTime = 0;
+      return(false);
+     }
+
+   successfulBackboneP4BarTime = state.backboneSuccesses[existing].successfulP4BarTime;
+   return(successfulBackboneP4BarTime > 0);
+  }
+
+void LogEntryBlockedByBackboneSuccess(const PatternSnapshot &pattern, const datetime successfulBackboneP4BarTime)
+  {
+   PrintFormat("Entry blocked by shared backbone successful P4 bar rule. symbol=%s timeframe=%s current_p4_bar=%s successful_p4_bar=%s "
+               "P0=%s P1=%s P2=%s P3=%s",
+               pattern.symbol,
+               EnumToString(InpTF),
+               FormatTime(pattern.p4BarTime),
+               FormatTime(successfulBackboneP4BarTime),
+               FormatTime(pattern.pointTimes[0]),
+               FormatTime(pattern.pointTimes[1]),
+               FormatTime(pattern.pointTimes[2]),
+               FormatTime(pattern.pointTimes[3]));
   }
 
 double GetRoleLow(const MqlRates &rate)
@@ -349,6 +494,8 @@ void ResetSymbolState(SymbolRuntimeState &state, const string symbol)
    state.historyCandidateCapacity = 0;
    state.lastEvaluatedP4Time = 0;
    state.lastEvaluatedP4Price = 0.0;
+   state.lastSuccessfulEntryBarTime = 0;
+   ResetBackboneSuccesses(state);
    ResetHistoryCache(state);
   }
 
@@ -567,6 +714,7 @@ bool RefreshHistoricalCache(SymbolRuntimeState &state)
       return(false);
      }
 
+   PruneBackboneSuccesses(state, rates[0].time);
    state.lastClosedBarTime = latestClosedBarTime;
    BuildHistoricalCandidateCache(state, rates);
    return(state.historyCandidateCount > 0);
@@ -765,6 +913,7 @@ void ResetPattern(PatternSnapshot &pattern)
   {
    pattern.valid = false;
    pattern.symbol = "";
+   pattern.p4BarTime = 0;
    for(int i = 0; i < PATTERN_POINT_COUNT; ++i)
      {
       pattern.pointIndexes[i] = -1;
@@ -886,7 +1035,7 @@ bool IsManagedPosition(const string symbolFilter)
    return(StringFind(comment, CommentPrefix()) == 0);
   }
 
-void ExecuteEntry(PatternSnapshot &pattern)
+void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
   {
    MqlTick tick;
    if(!SymbolInfoTick(pattern.symbol, tick))
@@ -903,8 +1052,9 @@ void ExecuteEntry(PatternSnapshot &pattern)
 
    if(tick.ask <= pattern.hardLossPrice)
      {
-      PrintFormat("Skipping pattern because current ask is already below hard loss. symbol=%s ask=%.5f hard_loss=%.5f",
+      PrintFormat("Skipping pattern because current ask is already below hard loss. symbol=%s p4_bar=%s ask=%.5f hard_loss=%.5f",
                   pattern.symbol,
+                  FormatTime(pattern.p4BarTime),
                   tick.ask,
                   pattern.hardLossPrice);
       return;
@@ -912,8 +1062,9 @@ void ExecuteEntry(PatternSnapshot &pattern)
 
    if(tick.ask >= pattern.profitPrice)
      {
-      PrintFormat("Skipping stale pattern because current ask is already beyond target. symbol=%s ask=%.5f target=%.5f",
+      PrintFormat("Skipping stale pattern because current ask is already beyond target. symbol=%s p4_bar=%s ask=%.5f target=%.5f",
                   pattern.symbol,
+                  FormatTime(pattern.p4BarTime),
                   tick.ask,
                   pattern.profitPrice);
       return;
@@ -923,8 +1074,9 @@ void ExecuteEntry(PatternSnapshot &pattern)
    const bool submitted = trade.Buy(InpFixedLots, pattern.symbol, 0.0, 0.0, 0.0, orderComment);
    if(!submitted)
      {
-      PrintFormat("Buy failed. symbol=%s retcode=%d msg=%s",
+      PrintFormat("Buy failed. symbol=%s p4_bar=%s retcode=%d msg=%s",
                   pattern.symbol,
+                  FormatTime(pattern.p4BarTime),
                   trade.ResultRetcode(),
                   trade.ResultRetcodeDescription());
       return;
@@ -933,11 +1085,15 @@ void ExecuteEntry(PatternSnapshot &pattern)
    const ulong ticket = FindNewestManagedPositionTicket(pattern.symbol);
    if(ticket == 0)
      {
-      PrintFormat("Buy succeeded but no managed position ticket found. symbol=%s", pattern.symbol);
+      PrintFormat("Buy succeeded but no managed position ticket found. symbol=%s p4_bar=%s",
+                  pattern.symbol,
+                  FormatTime(pattern.p4BarTime));
       return;
      }
 
    RegisterManagedPosition(ticket, pattern.symbol, pattern);
+   state.lastSuccessfulEntryBarTime = pattern.p4BarTime;
+   MarkBackboneSuccess(state, pattern, pattern.p4BarTime);
    LogEntry(pattern, trade.ResultPrice(), orderComment, ticket);
   }
 
@@ -957,9 +1113,10 @@ void LogNoiseFilterBlocked(const PatternSnapshot &pattern)
    if(!pattern.condH)
       failedConditions = "CondH";
 
-   PrintFormat("ENTRY_FILTER_BLOCKED symbol=%s failed=%s source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime "
+   PrintFormat("ENTRY_FILTER_BLOCKED symbol=%s p4_bar=%s failed=%s source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime "
                "buy_price=%.5f a=%.5f b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f b1=%.5f b2=%.5f",
                pattern.symbol,
+               FormatTime(pattern.p4BarTime),
                failedConditions,
                pattern.noiseFilterBuyPrice,
                pattern.a,
@@ -972,7 +1129,7 @@ void LogNoiseFilterBlocked(const PatternSnapshot &pattern)
 
 string BuildOrderComment(const PatternSnapshot &pattern)
   {
-   const string suffix = StringFormat("|P4|%I64d", (long)pattern.pointTimes[4]);
+   const string suffix = StringFormat("|P4|%I64d", (long)pattern.p4BarTime);
    return(CommentPrefix(StringLen(suffix)) + suffix);
   }
 
@@ -1224,7 +1381,7 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
 
 void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const string orderComment, const ulong ticket)
   {
-   PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
+   PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
                "noise_buy=%.5f condB=%s r1=%.5f threshold_r1=%.5f condH=%s b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f "
                "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime,P5:Low,P6:High "
                "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f) "
@@ -1232,6 +1389,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                pattern.symbol,
                ticket,
                orderComment,
+               FormatTime(pattern.p4BarTime),
                executedPrice,
                pattern.referenceEntryPrice,
                pattern.hardLossPrice,
@@ -1269,12 +1427,13 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
 
 void LogExit(const ManagedPositionState &state, const string reason, const double executedPrice)
   {
-   PrintFormat("EXIT symbol=%s ticket=%I64u reason=%s executed=%.5f hard_loss=%.5f soft_loss=%.5f profit=%.5f "
+   PrintFormat("EXIT symbol=%s ticket=%I64u reason=%s p4_bar=%s executed=%.5f hard_loss=%.5f soft_loss=%.5f profit=%.5f "
                "source=P4:Realtime,P5:Low,P6:High "
                "P4=(%s,%.5f) P5=(%s,%.5f) P6=(%s,%.5f) d=%.5f e=%.5f t5=%.2f t6=%.2f",
                state.symbol,
                state.ticket,
                reason,
+               FormatTime(state.snapshot.p4BarTime),
                executedPrice,
                state.snapshot.hardLossPrice,
                state.snapshot.softLossPrice,
