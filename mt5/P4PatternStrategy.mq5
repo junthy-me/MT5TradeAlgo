@@ -8,13 +8,6 @@
 #define PATTERN_SEGMENT_COUNT 6
 #define HISTORY_CANDIDATE_GROWTH_STEP 512
 
-enum PointValueTypeEnum
-  {
-   KMax = 0,
-   KMin = 1,
-   KAvg = 2
-  };
-
 input string InpSymbols = "AAPL;MSFT;NVDA";
 input ENUM_TIMEFRAMES InpTF = PERIOD_M5;
 input int InpTimerMillSec = 100;
@@ -27,15 +20,14 @@ input int InpSlippagePoints = 20;
 
 input int InpLookbackBars = 120;
 input int InpAdjustPointMaxSpanKNumber = 5;
-input PointValueTypeEnum InpPointValueType = KMax;
+input int InpMaxAdjustPointSpan = 2;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
 input double InpRatioC = 0.4;
 input double InpCondCZ = 1.0;
-input int InpTSpanMinConf = 5;
 
-input double InpSoftLossN = 0.5;
+input double InpSoftLossN = 0.65;
 input double InpSoftLossC = 1.0;
 input double InpProfitC = 1.8;
 input double NoiseFilter_bSumValueCompBuyPricePercent = 0.5;
@@ -62,7 +54,7 @@ struct PatternSnapshot
    double            sspanmin;
    double            t[PATTERN_SEGMENT_COUNT];
    double            triggerPatternTotalTimeMinute;
-   double            tspanmin;
+   int               adjacentSegmentCount;
    bool              condA;
    bool              condB;
    bool              condC;
@@ -168,6 +160,12 @@ bool ValidateInputs()
    if(InpAdjustPointMaxSpanKNumber < 1 || InpLookbackBars < 16)
      {
       Print("Lookback or point span settings are too small.");
+      return(false);
+     }
+
+   if(InpMaxAdjustPointSpan < 0 || InpMaxAdjustPointSpan > 4)
+     {
+      Print("InpMaxAdjustPointSpan must be between 0 and 4.");
       return(false);
      }
 
@@ -634,10 +632,10 @@ bool BuildHistoricalBackbone(const string symbol,
    pattern.t[1] = MinutesBetween(pattern.pointTimes[1], pattern.pointTimes[2]);
    pattern.t[2] = MinutesBetween(pattern.pointTimes[2], pattern.pointTimes[3]);
    pattern.triggerPatternTotalTimeMinute = pattern.t[0] + pattern.t[1] + pattern.t[2];
-   pattern.tspanmin = MinPositiveTime(pattern);
+   pattern.adjacentSegmentCount = CountAdjacentSegments(pattern);
 
    pattern.condA = InRange(pattern.b1 / pattern.b2, InpCondAXMin, InpCondAXMax);
-   pattern.condE = pattern.tspanmin >= (double)InpTSpanMinConf;
+   pattern.condE = pattern.adjacentSegmentCount <= InpMaxAdjustPointSpan;
    pattern.condF = MaxSpanWithinLimit(pattern);
    return(pattern.condA && pattern.condE && pattern.condF);
   }
@@ -926,8 +924,10 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
       return;
 
    PrintFormat("EXACT_COMPARE_MISMATCH symbol=%s cached_valid=%s legacy_valid=%s "
-               "cached_p3=%s cached_p4=%s cached_a=%.5f cached_b1=%.5f cached_b2=%.5f cached_c=%.5f "
-               "legacy_p3=%s legacy_p4=%s legacy_a=%.5f legacy_b1=%.5f legacy_b2=%.5f legacy_c=%.5f",
+               "cached_p3=%s cached_p4=%s cached_a=%.5f cached_b1=%.5f cached_b2=%.5f cached_c=%.5f cached_adjacent=%d "
+               "cached_spans=%d,%d,%d,%d "
+               "legacy_p3=%s legacy_p4=%s legacy_a=%.5f legacy_b1=%.5f legacy_b2=%.5f legacy_c=%.5f legacy_adjacent=%d "
+               "legacy_spans=%d,%d,%d,%d",
                state.symbol,
                cachedValid ? "true" : "false",
                legacyValid ? "true" : "false",
@@ -937,12 +937,22 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                cachedValid ? cachedMatch.b1 : 0.0,
                cachedValid ? cachedMatch.b2 : 0.0,
                cachedValid ? cachedMatch.c : 0.0,
+               cachedValid ? cachedMatch.adjacentSegmentCount : -1,
+               cachedValid ? cachedMatch.pointSpans[0] : -1,
+               cachedValid ? cachedMatch.pointSpans[1] : -1,
+               cachedValid ? cachedMatch.pointSpans[2] : -1,
+               cachedValid ? cachedMatch.pointSpans[3] : -1,
                legacyValid ? FormatTime(legacyMatch.pointTimes[3]) : "n/a",
                legacyValid ? FormatTime(legacyMatch.pointTimes[4]) : "n/a",
                legacyValid ? legacyMatch.a : 0.0,
                legacyValid ? legacyMatch.b1 : 0.0,
                legacyValid ? legacyMatch.b2 : 0.0,
-               legacyValid ? legacyMatch.c : 0.0);
+               legacyValid ? legacyMatch.c : 0.0,
+               legacyValid ? legacyMatch.adjacentSegmentCount : -1,
+               legacyValid ? legacyMatch.pointSpans[0] : -1,
+               legacyValid ? legacyMatch.pointSpans[1] : -1,
+               legacyValid ? legacyMatch.pointSpans[2] : -1,
+               legacyValid ? legacyMatch.pointSpans[3] : -1);
   }
 
 void ResetPattern(PatternSnapshot &pattern)
@@ -972,7 +982,7 @@ void ResetPattern(PatternSnapshot &pattern)
    pattern.r2 = 0.0;
    pattern.sspanmin = 0.0;
    pattern.triggerPatternTotalTimeMinute = 0.0;
-   pattern.tspanmin = 0.0;
+   pattern.adjacentSegmentCount = 0;
    pattern.condA = false;
    pattern.condB = false;
    pattern.condC = false;
@@ -1029,17 +1039,6 @@ double MinPositiveSpan(const PatternSnapshot &pattern)
      {
       if(values[i] > 0.0 && values[i] < value)
          value = values[i];
-     }
-   return(value == DBL_MAX ? 0.0 : value);
-  }
-
-double MinPositiveTime(const PatternSnapshot &pattern)
-  {
-   double value = DBL_MAX;
-   for(int i = 0; i < 3; ++i)
-     {
-      if(pattern.t[i] > 0.0 && pattern.t[i] < value)
-         value = pattern.t[i];
      }
    return(value == DBL_MAX ? 0.0 : value);
   }
@@ -1149,11 +1148,18 @@ void LogNoiseFilterBlocked(const PatternSnapshot &pattern)
    if(!pattern.condH)
       failedConditions = "CondH";
 
-   PrintFormat("ENTRY_FILTER_BLOCKED symbol=%s p4_bar=%s failed=%s source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime "
+   PrintFormat("ENTRY_FILTER_BLOCKED symbol=%s p4_bar=%s failed=%s adjacent=%d max_adjacent=%d spans=%d,%d,%d,%d "
+               "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime "
                "buy_price=%.5f a=%.5f b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f b1=%.5f b2=%.5f",
                pattern.symbol,
                FormatTime(pattern.p4BarTime),
                failedConditions,
+               pattern.adjacentSegmentCount,
+               InpMaxAdjustPointSpan,
+               pattern.pointSpans[0],
+               pattern.pointSpans[1],
+               pattern.pointSpans[2],
+               pattern.pointSpans[3],
                pattern.noiseFilterBuyPrice,
                pattern.a,
                pattern.noiseFilterBSumValue,
@@ -1371,7 +1377,7 @@ void UpdateSoftStopState(ManagedPositionState &state)
    if(state.snapshot.d <= 0.0 || state.snapshot.e <= 0.0)
       return;
 
-   if((state.snapshot.e - state.snapshot.d) >= (InpSoftLossN * state.snapshot.c))
+   if(state.snapshot.e >= (InpSoftLossN * (state.snapshot.c + state.snapshot.d)))
      {
       state.snapshot.softLossPrice = NormalizePrice(state.symbol, InpSoftLossC * state.snapshot.pointPrices[5]);
       state.softStopActive = true;
@@ -1419,6 +1425,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
   {
    PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
                "noise_buy=%.5f condB=%s r1=%.5f threshold_r1=%.5f condH=%s b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f "
+               "adjacent=%d max_adjacent=%d spans=%d,%d,%d,%d "
                "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime,P5:Low,P6:High "
                "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f) "
                "a=%.5f b1=%.5f b2=%.5f c=%.5f r1=%.5f r2=%.5f t1=%.2f t2=%.2f t3=%.2f t4=%.2f total=%.2f",
@@ -1438,6 +1445,12 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                pattern.noiseFilterBSumValue,
                pattern.noiseFilterBSumPercent,
                NoiseFilter_bSumValueCompBuyPricePercent,
+               pattern.adjacentSegmentCount,
+               InpMaxAdjustPointSpan,
+               pattern.pointSpans[0],
+               pattern.pointSpans[1],
+               pattern.pointSpans[2],
+               pattern.pointSpans[3],
                FormatTime(pattern.pointTimes[0]),
                pattern.pointPrices[0],
                FormatTime(pattern.pointTimes[1]),
@@ -1491,4 +1504,14 @@ string FormatTime(const datetime value)
    if(value == 0)
       return("n/a");
    return(TimeToString(value, TIME_DATE | TIME_MINUTES));
+  }
+int CountAdjacentSegments(const PatternSnapshot &pattern)
+  {
+   int count = 0;
+   for(int i = 0; i < 4; ++i)
+     {
+      if(pattern.pointSpans[i] == 1)
+         ++count;
+     }
+   return(count);
   }
