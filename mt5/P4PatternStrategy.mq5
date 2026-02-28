@@ -282,9 +282,10 @@ void ProcessSymbol(const string symbol)
      }
 
    datetime successfulBackboneP4BarTime = 0;
-   if(IsBackboneSuccessLocked(g_symbolStates[stateIndex], match, successfulBackboneP4BarTime))
+   string matchedBackbonePoint = "";
+   if(IsBackboneSuccessLocked(g_symbolStates[stateIndex], match, successfulBackboneP4BarTime, matchedBackbonePoint))
      {
-      LogEntryBlockedByBackboneSuccess(match, successfulBackboneP4BarTime);
+      LogEntryBlockedByBackboneSuccess(match, successfulBackboneP4BarTime, matchedBackbonePoint);
       return;
      }
 
@@ -345,6 +346,23 @@ bool IsP4BarLocked(const SymbolRuntimeState &state, const datetime currentBarTim
    return(currentBarTime > 0 && state.lastSuccessfulEntryBarTime == currentBarTime);
   }
 
+string GetBackbonePointLabel(const int pointIndex)
+  {
+   switch(pointIndex)
+     {
+      case 0:
+         return("P0");
+      case 1:
+         return("P1");
+      case 2:
+         return("P2");
+      case 3:
+         return("P3");
+      default:
+         return("unknown");
+     }
+  }
+
 void LogEntryBlockedByP4Bar(const string symbol, const datetime currentBarTime)
   {
    PrintFormat("Entry blocked by P4 bar lock. symbol=%s timeframe=%s p4_bar=%s",
@@ -384,15 +402,25 @@ void PruneBackboneSuccesses(SymbolRuntimeState &state, const datetime oldestReta
      }
   }
 
-int FindBackboneSuccess(const SymbolRuntimeState &state, const PatternSnapshot &pattern)
+int FindBackboneSuccess(const SymbolRuntimeState &state,
+                        const PatternSnapshot &pattern,
+                        int &matchedPointIndex)
   {
+   matchedPointIndex = -1;
    for(int i = 0; i < state.backboneSuccessCount; ++i)
      {
-      if(state.backboneSuccesses[i].pointTimes[0] == pattern.pointTimes[0] &&
-         state.backboneSuccesses[i].pointTimes[1] == pattern.pointTimes[1] &&
-         state.backboneSuccesses[i].pointTimes[2] == pattern.pointTimes[2] &&
-         state.backboneSuccesses[i].pointTimes[3] == pattern.pointTimes[3])
-         return(i);
+      for(int pointIndex = 0; pointIndex < 4; ++pointIndex)
+        {
+         if(state.backboneSuccesses[i].pointTimes[pointIndex] <= 0 ||
+            pattern.pointTimes[pointIndex] <= 0)
+            continue;
+
+         if(state.backboneSuccesses[i].pointTimes[pointIndex] == pattern.pointTimes[pointIndex])
+           {
+            matchedPointIndex = pointIndex;
+            return(i);
+           }
+        }
      }
    return(-1);
   }
@@ -401,7 +429,8 @@ void MarkBackboneSuccess(SymbolRuntimeState &state,
                          const PatternSnapshot &pattern,
                          const datetime successfulP4BarTime)
   {
-   const int existing = FindBackboneSuccess(state, pattern);
+   int matchedPointIndex = -1;
+   const int existing = FindBackboneSuccess(state, pattern, matchedPointIndex);
    if(existing >= 0)
      {
       state.backboneSuccesses[existing].successfulP4BarTime = successfulP4BarTime;
@@ -420,27 +449,34 @@ void MarkBackboneSuccess(SymbolRuntimeState &state,
 
 bool IsBackboneSuccessLocked(const SymbolRuntimeState &state,
                              const PatternSnapshot &pattern,
-                             datetime &successfulBackboneP4BarTime)
+                             datetime &successfulBackboneP4BarTime,
+                             string &matchedPointLabel)
   {
-   const int existing = FindBackboneSuccess(state, pattern);
+   int matchedPointIndex = -1;
+   const int existing = FindBackboneSuccess(state, pattern, matchedPointIndex);
    if(existing < 0)
      {
       successfulBackboneP4BarTime = 0;
+      matchedPointLabel = "";
       return(false);
      }
 
    successfulBackboneP4BarTime = state.backboneSuccesses[existing].successfulP4BarTime;
+   matchedPointLabel = GetBackbonePointLabel(matchedPointIndex);
    return(successfulBackboneP4BarTime > 0);
   }
 
-void LogEntryBlockedByBackboneSuccess(const PatternSnapshot &pattern, const datetime successfulBackboneP4BarTime)
+void LogEntryBlockedByBackboneSuccess(const PatternSnapshot &pattern,
+                                      const datetime successfulBackboneP4BarTime,
+                                      const string matchedPointLabel)
   {
    PrintFormat("Entry blocked by shared backbone successful P4 bar rule. symbol=%s timeframe=%s current_p4_bar=%s successful_p4_bar=%s "
-               "P0=%s P1=%s P2=%s P3=%s",
+               "matched_point=%s P0=%s P1=%s P2=%s P3=%s",
                pattern.symbol,
                EnumToString(InpTF),
                FormatTime(pattern.p4BarTime),
                FormatTime(successfulBackboneP4BarTime),
+               matchedPointLabel,
                FormatTime(pattern.pointTimes[0]),
                FormatTime(pattern.pointTimes[1]),
                FormatTime(pattern.pointTimes[2]),
