@@ -22,17 +22,6 @@
 - **WHEN** 某个候选入场信号进入噪声过滤阶段
 - **THEN** 策略不会再执行基于 `a / buyPrice` 的 `CondG` 判断
 
-### Requirement: 强止损与止盈价格不得再由 a 单独推导
-策略 SHALL 将强止损价设为 `P0` 点位值，并将止盈价设为 `entryPrice + InpProfitC * (b1+b2+a)`，其中 `P0` 点位值在当前策略中 SHALL 等于 `P0` 所在已收盘 K 线的最低价。
-
-#### Scenario: 强止损锚定 P0
-- **WHEN** 某个候选模式被确认并准备创建或管理持仓
-- **THEN** 策略将该持仓的强止损价设为 `P0` 点位值，而不是 `entryPrice - k*a`
-
-#### Scenario: 止盈使用整体结构振幅
-- **WHEN** 某个候选模式被确认并已经得到 `entryPrice`、`a`、`b1` 和 `b2`
-- **THEN** 策略将止盈价设为 `entryPrice + InpProfitC * (b1+b2+a)`
-
 ### Requirement: 参数与日志必须反映 a 的新角色
 策略 SHALL 删除不再使用的旧参数，新增 `InpRatioC` 与 `NoiseFilter_bSumValueCompBuyPricePercent`，并在日志中继续打印 `a` 作为调试字段，同时补充新的 `CondB` 与 `CondH` 判定明细。
 
