@@ -17,7 +17,7 @@ input string InpComment = "P4PatternStrategy";
 input double InpFixedLots = 0.05;
 input int InpMaxPositionsPerSymbol = 10;
 input int InpSlippagePoints = 20;
-
+input int InpProfitObservationBars = 30;
 input int InpLookbackBars = 120;
 input int InpAdjustPointMaxSpanKNumber = 5;
 input int InpMaxAdjustPointSpan = 2;
@@ -82,6 +82,9 @@ struct SymbolRuntimeState
   {
    string            symbol;
    datetime          lastClosedBarTime;
+   long              lastProcessedTickTimeMsc;
+   double            lastProcessedTickBid;
+   double            lastProcessedTickAsk;
    bool              historyCacheReady;
    int               historyCandidateCount;
    int               historyCandidateCapacity;
@@ -89,6 +92,7 @@ struct SymbolRuntimeState
    datetime          lastEvaluatedP4Time;
    double            lastEvaluatedP4Price;
    datetime          lastSuccessfulEntryBarTime;
+   datetime          lastProfitTargetExitBarTime;
    int               backboneSuccessCount;
    BackboneSuccessState backboneSuccesses[];
   };
@@ -169,6 +173,12 @@ bool ValidateInputs()
       return(false);
      }
 
+   if(InpProfitObservationBars < 0)
+     {
+      Print("InpProfitObservationBars must be greater than or equal to 0.");
+      return(false);
+     }
+
    if(InpCondAXMin <= 0.0 || InpCondAXMax <= 0.0 || InpCondAXMin > InpCondAXMax)
      {
       Print("Invalid CondA range.");
@@ -242,15 +252,18 @@ void ProcessSymbol(const string symbol)
    if(!EnsureSymbolReady(symbol))
       return;
 
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick) || tick.ask <= 0.0)
+      return;
+
+   if(!HasNewProcessableTick(g_symbolStates[stateIndex], tick))
+      return;
+
    CleanupPositionStates();
    ManageOpenPositions(symbol);
 
    PatternSnapshot match;
    if(!RefreshHistoricalCache(g_symbolStates[stateIndex]))
-      return;
-
-   MqlTick tick;
-   if(!SymbolInfoTick(symbol, tick) || tick.ask <= 0.0)
       return;
 
    const datetime currentBarTime = GetCurrentBarOpenTime(symbol);
@@ -272,6 +285,17 @@ void ProcessSymbol(const string symbol)
 
    g_symbolStates[stateIndex].lastEvaluatedP4Time = match.pointTimes[4];
    g_symbolStates[stateIndex].lastEvaluatedP4Price = match.pointPrices[4];
+
+   datetime lastProfitTargetExitBarTime = 0;
+   int blockedBarsRemaining = 0;
+   if(IsProfitObservationLocked(g_symbolStates[stateIndex], symbol, currentBarTime, lastProfitTargetExitBarTime, blockedBarsRemaining))
+     {
+      LogEntryBlockedByProfitObservation(symbol,
+                                         currentBarTime,
+                                         lastProfitTargetExitBarTime,
+                                         blockedBarsRemaining);
+      return;
+     }
 
    if(IsP4BarLocked(g_symbolStates[stateIndex], currentBarTime))
      {
@@ -344,6 +368,26 @@ bool IsP4BarLocked(const SymbolRuntimeState &state, const datetime currentBarTim
    return(currentBarTime > 0 && state.lastSuccessfulEntryBarTime == currentBarTime);
   }
 
+bool IsProfitObservationLocked(const SymbolRuntimeState &state,
+                               const string symbol,
+                               const datetime currentBarTime,
+                               datetime &lastProfitTargetExitBarTime,
+                               int &blockedBarsRemaining)
+  {
+   lastProfitTargetExitBarTime = state.lastProfitTargetExitBarTime;
+   blockedBarsRemaining = 0;
+
+   if(InpProfitObservationBars <= 0 || currentBarTime <= 0 || lastProfitTargetExitBarTime <= 0)
+      return(false);
+
+   const int exitBarShift = iBarShift(symbol, InpTF, lastProfitTargetExitBarTime, false);
+   if(exitBarShift < 0 || exitBarShift > InpProfitObservationBars)
+      return(false);
+
+   blockedBarsRemaining = InpProfitObservationBars - exitBarShift;
+   return(true);
+  }
+
 string GetBackbonePointLabel(const int pointIndex)
   {
    switch(pointIndex)
@@ -367,6 +411,20 @@ void LogEntryBlockedByP4Bar(const string symbol, const datetime currentBarTime)
                symbol,
                EnumToString(InpTF),
                FormatTime(currentBarTime));
+  }
+
+void LogEntryBlockedByProfitObservation(const string symbol,
+                                        const datetime currentBarTime,
+                                        const datetime lastProfitTargetExitBarTime,
+                                        const int blockedBarsRemaining)
+  {
+   PrintFormat("Entry blocked by post-profit observation window. symbol=%s timeframe=%s current_bar=%s profit_exit_bar=%s bars_remaining=%d configured_bars=%d",
+               symbol,
+               EnumToString(InpTF),
+               FormatTime(currentBarTime),
+               FormatTime(lastProfitTargetExitBarTime),
+               blockedBarsRemaining,
+               InpProfitObservationBars);
   }
 
 void ResetBackboneSuccesses(SymbolRuntimeState &state)
@@ -525,10 +583,14 @@ void ResetSymbolState(SymbolRuntimeState &state, const string symbol)
   {
    state.symbol = symbol;
    state.lastClosedBarTime = 0;
+   state.lastProcessedTickTimeMsc = 0;
+   state.lastProcessedTickBid = 0.0;
+   state.lastProcessedTickAsk = 0.0;
    state.historyCandidateCapacity = 0;
    state.lastEvaluatedP4Time = 0;
    state.lastEvaluatedP4Price = 0.0;
    state.lastSuccessfulEntryBarTime = 0;
+   state.lastProfitTargetExitBarTime = 0;
    ResetBackboneSuccesses(state);
    ResetHistoryCache(state);
   }
@@ -547,7 +609,20 @@ bool LoadClosedRates(const string symbol, MqlRates &rates[])
 
    ArrayResize(rates, copied);
    ArraySetAsSeries(rates, false);
-   return(copied >= (InpAdjustPointMaxSpanKNumber * 4 + 1));
+  return(copied >= (InpAdjustPointMaxSpanKNumber * 4 + 1));
+  }
+
+bool HasNewProcessableTick(SymbolRuntimeState &state, const MqlTick &tick)
+  {
+   if(state.lastProcessedTickTimeMsc == tick.time_msc &&
+      state.lastProcessedTickBid == tick.bid &&
+      state.lastProcessedTickAsk == tick.ask)
+      return(false);
+
+   state.lastProcessedTickTimeMsc = tick.time_msc;
+   state.lastProcessedTickBid = tick.bid;
+   state.lastProcessedTickAsk = tick.ask;
+   return(true);
   }
 
 void CollectCandidateIndexes(const int startIndex,
@@ -1415,6 +1490,13 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
                   trade.ResultRetcode(),
                   trade.ResultRetcodeDescription());
       return;
+     }
+
+   if(reason == "profit_target")
+     {
+      const int symbolStateIndex = FindSymbolState(symbol);
+      if(symbolStateIndex >= 0)
+         g_symbolStates[symbolStateIndex].lastProfitTargetExitBarTime = GetCurrentBarOpenTime(symbol);
      }
 
    LogExit(g_positionStates[stateIndex], reason, triggerPrice);
