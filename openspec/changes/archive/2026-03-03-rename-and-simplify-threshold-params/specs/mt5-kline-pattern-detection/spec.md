@@ -1,0 +1,23 @@
+## MODIFIED Requirements
+
+### Requirement: 强制执行可配置的点位取值与单段跨度规则
+策略 SHALL 支持 `AdjustPointMaxSpanKNumber` 来限制相邻点之间最多跨越的 K 线数量。与此同时，策略 SHALL 使用角色化点位规则来确定 `P0-P6` 的价格来源，而 SHALL NOT 再暴露 `PointValueTypeEnum` 作为统一点位取值模式。任何超过配置跨度的候选序列 SHALL 被拒绝。
+
+#### Scenario: 相邻点跨度超限时拒绝该序列
+- **WHEN** 某个候选序列中的任意相邻点对跨越的 K 线数量超过 `AdjustPointMaxSpanKNumber`
+- **THEN** 检测器拒绝该序列，且不会报告有效模式匹配
+
+#### Scenario: 检测器仅使用角色化点位规则
+- **WHEN** 本策略为候选序列计算 `P0-P6` 点位价格
+- **THEN** 检测器固定按角色化规则取值，而不会再读取统一的 `PointValueTypeEnum` 配置
+
+### Requirement: 仅在 CondA、CondB、CondC 和 CondF 满足时确认完整匹配
+策略 SHALL 仅在以下条件全部满足时将某个形态视为完整匹配：`b1 = x * b2` 且落在配置的 `x` 系数范围内，`r1 = c / (a+b1+b2)` 且满足 `r1 >= InpMinP3P4DropRatioOfStructure`，`t4 < z * (t1 + t2 + t3)`，以及每个相邻点跨度都小于或等于 `AdjustPointMaxSpanKNumber`。
+
+#### Scenario: 全部约束通过时输出完整匹配
+- **WHEN** 某个候选序列在当前输入配置下同时满足 CondA、CondB、CondC 和 CondF
+- **THEN** 检测器将该序列标记为完整模式匹配，并将其提供给交易处理逻辑
+
+#### Scenario: 部分匹配不得用于交易
+- **WHEN** 某个候选序列的 CondA、CondB、CondC 或 CondF 中任意一项校验失败
+- **THEN** 检测器不会将该序列输出为可交易匹配
