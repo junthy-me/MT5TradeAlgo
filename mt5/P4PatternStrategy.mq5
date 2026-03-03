@@ -15,22 +15,23 @@ input long InpMagic = 9527001;
 input string InpComment = "P4PatternStrategy";
 
 input double InpFixedLots = 0.05;
-input int InpMaxPositionsPerSymbol = 10;
+input int InpMaxPositionsPerSymbol = 1;
 input int InpSlippagePoints = 20;
 input int InpProfitObservationBars = 30;
-input int InpLookbackBars = 120;
-input int InpAdjustPointMaxSpanKNumber = 5;
-input int InpMaxAdjustPointSpan = 2;
+input int InpLookbackBars = 300;
+input int InpAdjustPointMaxSpanKNumber = 10;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
-input double InpRatioC = 0.4;
+input double InpP3P4DropMinRatioOfStructure = 0.4;
 input double InpCondCZ = 1.0;
+input double InpP1P2AValueSpaceMinPriceLimit = 5.0;
+input int InpP1P2AValueTimeMinKNumberLimit = 3;
+input double InpBSumValueMinRatioOfAValue = 2.0;
 
-input double InpSoftLossN = 0.65;
+input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.65;
 input double InpSoftLossC = 1.0;
-input double InpProfitC = 1.8;
-input double NoiseFilter_bSumValueCompBuyPricePercent = 0.5;
+input double InpProfitC = 0.6;
 input bool InpEnableExactSearchCompare = false;
 
 struct PatternSnapshot
@@ -54,22 +55,15 @@ struct PatternSnapshot
    double            sspanmin;
    double            t[PATTERN_SEGMENT_COUNT];
    double            triggerPatternTotalTimeMinute;
-   int               adjacentSegmentCount;
    bool              condA;
    bool              condB;
    bool              condC;
    bool              condD;
-   bool              condE;
    bool              condF;
-   bool              condG;
-   bool              condH;
    double            referenceEntryPrice;
    double            hardLossPrice;
    double            softLossPrice;
    double            profitPrice;
-   double            noiseFilterBuyPrice;
-   double            noiseFilterBSumPercent;
-   double            noiseFilterBSumValue;
   };
 
 struct BackboneSuccessState
@@ -167,12 +161,6 @@ bool ValidateInputs()
       return(false);
      }
 
-   if(InpMaxAdjustPointSpan < 0 || InpMaxAdjustPointSpan > 4)
-     {
-      Print("InpMaxAdjustPointSpan must be between 0 and 4.");
-      return(false);
-     }
-
    if(InpProfitObservationBars < 0)
      {
       Print("InpProfitObservationBars must be greater than or equal to 0.");
@@ -185,15 +173,27 @@ bool ValidateInputs()
       return(false);
      }
 
-   if(InpRatioC < 0.0)
+   if(InpP3P4DropMinRatioOfStructure < 0.0)
      {
-      Print("Invalid CondB ratio threshold.");
+      Print("Invalid P3-P4 drop ratio threshold.");
       return(false);
      }
 
-   if(NoiseFilter_bSumValueCompBuyPricePercent < 0.0)
+   if(InpP1P2AValueSpaceMinPriceLimit < 0.0)
      {
-      Print("Invalid noise filter threshold.");
+      Print("Invalid P1-P2 a-value minimum price threshold.");
+      return(false);
+     }
+
+   if(InpP1P2AValueTimeMinKNumberLimit < 1)
+     {
+      Print("Invalid P1-P2 a-value minimum bar count.");
+      return(false);
+     }
+
+   if(InpBSumValueMinRatioOfAValue < 0.0)
+     {
+      Print("Invalid b-sum to a-value ratio threshold.");
       return(false);
      }
 
@@ -707,12 +707,16 @@ bool BuildHistoricalBackbone(const string symbol,
    pattern.t[1] = MinutesBetween(pattern.pointTimes[1], pattern.pointTimes[2]);
    pattern.t[2] = MinutesBetween(pattern.pointTimes[2], pattern.pointTimes[3]);
    pattern.triggerPatternTotalTimeMinute = pattern.t[0] + pattern.t[1] + pattern.t[2];
-   pattern.adjacentSegmentCount = CountAdjacentSegments(pattern);
 
+   const int p1p2BarCount = pattern.pointSpans[1] + 1;
+   const double bSumValue = pattern.b1 + pattern.b2;
    pattern.condA = InRange(pattern.b1 / pattern.b2, InpCondAXMin, InpCondAXMax);
-   pattern.condE = pattern.adjacentSegmentCount <= InpMaxAdjustPointSpan;
    pattern.condF = MaxSpanWithinLimit(pattern);
-   return(pattern.condA && pattern.condE && pattern.condF);
+   return(pattern.condA &&
+          pattern.condF &&
+          pattern.a >= InpP1P2AValueSpaceMinPriceLimit &&
+          p1p2BarCount >= InpP1P2AValueTimeMinKNumberLimit &&
+          bSumValue >= (InpBSumValueMinRatioOfAValue * pattern.a));
   }
 
 bool AppendHistoricalCandidate(SymbolRuntimeState &state, const PatternSnapshot &pattern)
@@ -852,11 +856,11 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
    pattern.t[3] = MinutesBetween(pattern.pointTimes[3], pattern.pointTimes[4]);
    pattern.triggerPatternTotalTimeMinute = pattern.t[0] + pattern.t[1] + pattern.t[2] + pattern.t[3];
 
-   pattern.condB = pattern.r1 >= InpRatioC;
+   pattern.condB = pattern.r1 >= InpP3P4DropMinRatioOfStructure;
    pattern.condC = pattern.t[3] < (InpCondCZ * (pattern.t[0] + pattern.t[1] + pattern.t[2]));
    pattern.condD = true;
 
-   if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condE && pattern.condF))
+   if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condF))
      {
       ResetPattern(pattern);
       return(false);
@@ -984,7 +988,6 @@ bool ArePatternsEquivalent(const bool lhsValid,
           lhs.condB == rhs.condB &&
           lhs.condC == rhs.condC &&
           lhs.condD == rhs.condD &&
-          lhs.condE == rhs.condE &&
           lhs.condF == rhs.condF);
   }
 
@@ -999,9 +1002,11 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
       return;
 
    PrintFormat("EXACT_COMPARE_MISMATCH symbol=%s cached_valid=%s legacy_valid=%s "
-               "cached_p3=%s cached_p4=%s cached_a=%.5f cached_b1=%.5f cached_b2=%.5f cached_c=%.5f cached_adjacent=%d "
+               "cached_p3=%s cached_p4=%s cached_a=%.5f cached_b1=%.5f cached_b2=%.5f cached_c=%.5f "
+               "cached_p1p2_bars=%d cached_bsum_ratio_of_a=%.5f "
                "cached_spans=%d,%d,%d,%d "
-               "legacy_p3=%s legacy_p4=%s legacy_a=%.5f legacy_b1=%.5f legacy_b2=%.5f legacy_c=%.5f legacy_adjacent=%d "
+               "legacy_p3=%s legacy_p4=%s legacy_a=%.5f legacy_b1=%.5f legacy_b2=%.5f legacy_c=%.5f "
+               "legacy_p1p2_bars=%d legacy_bsum_ratio_of_a=%.5f "
                "legacy_spans=%d,%d,%d,%d",
                state.symbol,
                cachedValid ? "true" : "false",
@@ -1012,7 +1017,8 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                cachedValid ? cachedMatch.b1 : 0.0,
                cachedValid ? cachedMatch.b2 : 0.0,
                cachedValid ? cachedMatch.c : 0.0,
-               cachedValid ? cachedMatch.adjacentSegmentCount : -1,
+               cachedValid ? (cachedMatch.pointSpans[1] + 1) : -1,
+               (cachedValid && cachedMatch.a > 0.0) ? ((cachedMatch.b1 + cachedMatch.b2) / cachedMatch.a) : 0.0,
                cachedValid ? cachedMatch.pointSpans[0] : -1,
                cachedValid ? cachedMatch.pointSpans[1] : -1,
                cachedValid ? cachedMatch.pointSpans[2] : -1,
@@ -1023,7 +1029,8 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                legacyValid ? legacyMatch.b1 : 0.0,
                legacyValid ? legacyMatch.b2 : 0.0,
                legacyValid ? legacyMatch.c : 0.0,
-               legacyValid ? legacyMatch.adjacentSegmentCount : -1,
+               legacyValid ? (legacyMatch.pointSpans[1] + 1) : -1,
+               (legacyValid && legacyMatch.a > 0.0) ? ((legacyMatch.b1 + legacyMatch.b2) / legacyMatch.a) : 0.0,
                legacyValid ? legacyMatch.pointSpans[0] : -1,
                legacyValid ? legacyMatch.pointSpans[1] : -1,
                legacyValid ? legacyMatch.pointSpans[2] : -1,
@@ -1057,22 +1064,15 @@ void ResetPattern(PatternSnapshot &pattern)
    pattern.r2 = 0.0;
    pattern.sspanmin = 0.0;
    pattern.triggerPatternTotalTimeMinute = 0.0;
-   pattern.adjacentSegmentCount = 0;
    pattern.condA = false;
    pattern.condB = false;
    pattern.condC = false;
    pattern.condD = false;
-   pattern.condE = false;
    pattern.condF = false;
-   pattern.condG = false;
-   pattern.condH = false;
    pattern.referenceEntryPrice = 0.0;
    pattern.hardLossPrice = 0.0;
    pattern.softLossPrice = 0.0;
    pattern.profitPrice = 0.0;
-   pattern.noiseFilterBuyPrice = 0.0;
-   pattern.noiseFilterBSumPercent = 0.0;
-   pattern.noiseFilterBSumValue = 0.0;
   }
 
 double MinutesBetween(const datetime fromTime, const datetime toTime)
@@ -1154,12 +1154,6 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
    if(tick.ask <= 0.0)
       return;
 
-   if(!EvaluateNoiseFilters(pattern, tick.ask))
-     {
-      LogNoiseFilterBlocked(pattern);
-      return;
-     }
-
    if(tick.ask <= pattern.hardLossPrice)
      {
       PrintFormat("Skipping pattern because current ask is already below hard loss. symbol=%s p4_bar=%s ask=%.5f hard_loss=%.5f",
@@ -1205,43 +1199,6 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
    state.lastSuccessfulEntryBarTime = pattern.p4BarTime;
    MarkBackboneSuccess(state, pattern, pattern.p4BarTime);
    LogEntry(pattern, trade.ResultPrice(), orderComment, ticket);
-  }
-
-bool EvaluateNoiseFilters(PatternSnapshot &pattern, const double buyPrice)
-  {
-   pattern.noiseFilterBuyPrice = NormalizePrice(pattern.symbol, buyPrice);
-   pattern.noiseFilterBSumValue = pattern.b1 + pattern.b2;
-   pattern.noiseFilterBSumPercent = (buyPrice > 0.0) ? (pattern.noiseFilterBSumValue / buyPrice) * 100.0 : 0.0;
-   pattern.condG = true;
-   pattern.condH = pattern.noiseFilterBSumPercent >= NoiseFilter_bSumValueCompBuyPricePercent;
-   return(pattern.condH);
-  }
-
-void LogNoiseFilterBlocked(const PatternSnapshot &pattern)
-  {
-   string failedConditions = "";
-   if(!pattern.condH)
-      failedConditions = "CondH";
-
-   PrintFormat("ENTRY_FILTER_BLOCKED symbol=%s p4_bar=%s failed=%s adjacent=%d max_adjacent=%d spans=%d,%d,%d,%d "
-               "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime "
-               "buy_price=%.5f a=%.5f b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f b1=%.5f b2=%.5f",
-               pattern.symbol,
-               FormatTime(pattern.p4BarTime),
-               failedConditions,
-               pattern.adjacentSegmentCount,
-               InpMaxAdjustPointSpan,
-               pattern.pointSpans[0],
-               pattern.pointSpans[1],
-               pattern.pointSpans[2],
-               pattern.pointSpans[3],
-               pattern.noiseFilterBuyPrice,
-               pattern.a,
-               pattern.noiseFilterBSumValue,
-               pattern.noiseFilterBSumPercent,
-               NoiseFilter_bSumValueCompBuyPricePercent,
-               pattern.b1,
-               pattern.b2);
   }
 
 string BuildOrderComment(const PatternSnapshot &pattern)
@@ -1452,7 +1409,7 @@ void UpdateSoftStopState(ManagedPositionState &state)
    if(state.snapshot.d <= 0.0 || state.snapshot.e <= 0.0)
       return;
 
-   if(state.snapshot.e >= (InpSoftLossN * (state.snapshot.c + state.snapshot.d)))
+   if(state.snapshot.e >= (InpP5P6ReboundMinRatioOfP3P5Drop * (state.snapshot.c + state.snapshot.d)))
      {
       state.snapshot.softLossPrice = NormalizePrice(state.symbol, InpSoftLossC * state.snapshot.pointPrices[5]);
       state.softStopActive = true;
@@ -1506,8 +1463,9 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
 void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const string orderComment, const ulong ticket)
   {
    PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
-               "noise_buy=%.5f condB=%s r1=%.5f threshold_r1=%.5f condH=%s b_sum=%.5f b_sum_pct=%.5f threshold_pct=%.5f "
-               "adjacent=%d max_adjacent=%d spans=%d,%d,%d,%d "
+               "condB=%s r1=%.5f p3p4_drop_min_ratio=%.5f "
+               "a_min_price=%.5f p1p2_min_bars=%d bsum_min_ratio_of_a=%.5f "
+               "spans=%d,%d,%d,%d p1p2_bars=%d bsum=%.5f bsum_ratio_of_a=%.5f "
                "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime,P5:Low,P6:High "
                "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f) "
                "a=%.5f b1=%.5f b2=%.5f c=%.5f r1=%.5f r2=%.5f t1=%.2f t2=%.2f t3=%.2f t4=%.2f total=%.2f",
@@ -1519,20 +1477,19 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                pattern.referenceEntryPrice,
                pattern.hardLossPrice,
                pattern.profitPrice,
-               pattern.noiseFilterBuyPrice,
                pattern.condB ? "true" : "false",
                pattern.r1,
-               InpRatioC,
-               pattern.condH ? "true" : "false",
-               pattern.noiseFilterBSumValue,
-               pattern.noiseFilterBSumPercent,
-               NoiseFilter_bSumValueCompBuyPricePercent,
-               pattern.adjacentSegmentCount,
-               InpMaxAdjustPointSpan,
+               InpP3P4DropMinRatioOfStructure,
+               InpP1P2AValueSpaceMinPriceLimit,
+               InpP1P2AValueTimeMinKNumberLimit,
+               InpBSumValueMinRatioOfAValue,
                pattern.pointSpans[0],
                pattern.pointSpans[1],
                pattern.pointSpans[2],
                pattern.pointSpans[3],
+               pattern.pointSpans[1] + 1,
+               pattern.b1 + pattern.b2,
+               (pattern.a > 0.0) ? ((pattern.b1 + pattern.b2) / pattern.a) : 0.0,
                FormatTime(pattern.pointTimes[0]),
                pattern.pointPrices[0],
                FormatTime(pattern.pointTimes[1]),
@@ -1586,14 +1543,4 @@ string FormatTime(const datetime value)
    if(value == 0)
       return("n/a");
    return(TimeToString(value, TIME_DATE | TIME_MINUTES));
-  }
-int CountAdjacentSegments(const PatternSnapshot &pattern)
-  {
-   int count = 0;
-   for(int i = 0; i < 4; ++i)
-     {
-      if(pattern.pointSpans[i] == 1)
-         ++count;
-     }
-   return(count);
   }
