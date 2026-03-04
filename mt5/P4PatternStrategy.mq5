@@ -28,6 +28,9 @@ input double InpCondCZ = 1.0;
 input double InpP1P2AValueSpaceMinPriceLimit = 5.0;
 input int InpP1P2AValueTimeMinKNumberLimit = 3;
 input double InpBSumValueMinRatioOfAValue = 2.0;
+input int InpPreCondPriorDeclineLookbackBars = 20;
+input double InpPreCondPriorDeclineMinDropRatioOfStructure = 0.7;
+input int InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 = 0;
 
 input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.65;
 input double InpSoftLossC = 1.0;
@@ -55,6 +58,13 @@ struct PatternSnapshot
    double            sspanmin;
    double            t[PATTERN_SEGMENT_COUNT];
    double            triggerPatternTotalTimeMinute;
+   bool              preCondPriorDecline;
+   int               pre0Index;
+   datetime          pre0Time;
+   double            pre0Price;
+   double            pre0Drop;
+   double            pre0MinRequiredDrop;
+   int               pre0BarsBetweenP0;
    bool              condA;
    bool              condB;
    bool              condC;
@@ -194,6 +204,24 @@ bool ValidateInputs()
    if(InpBSumValueMinRatioOfAValue < 0.0)
      {
       Print("Invalid b-sum to a-value ratio threshold.");
+      return(false);
+     }
+
+   if(InpPreCondPriorDeclineLookbackBars < 1)
+     {
+      Print("Invalid prior decline precondition lookback bars.");
+      return(false);
+     }
+
+   if(InpPreCondPriorDeclineMinDropRatioOfStructure < 0.0)
+     {
+      Print("Invalid prior decline precondition minimum drop ratio.");
+      return(false);
+     }
+
+   if(InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 < 0)
+     {
+      Print("Invalid prior decline precondition minimum bars between Pre0 and P0.");
       return(false);
      }
 
@@ -644,6 +672,67 @@ void CollectCandidateIndexes(const int startIndex,
       indexes[cursor++] = i;
   }
 
+bool EvaluatePriorDeclinePrecondition(MqlRates &rates[], PatternSnapshot &pattern)
+  {
+   const int p0Index = pattern.pointIndexes[0];
+   if(p0Index <= 0)
+      return(false);
+
+   const int endIndex = p0Index - 1;
+   const int startIndex = MathMax(0, p0Index - InpPreCondPriorDeclineLookbackBars);
+   if(endIndex < startIndex)
+      return(false);
+
+   const double structureValue = pattern.a + pattern.b1 + pattern.b2;
+   const double minRequiredDrop = NormalizePrice(pattern.symbol,
+                                                 InpPreCondPriorDeclineMinDropRatioOfStructure * structureValue);
+   int bestIndex = -1;
+   double bestPrice = 0.0;
+   double bestDrop = 0.0;
+   int bestBarsBetween = -1;
+
+   pattern.preCondPriorDecline = false;
+   pattern.pre0MinRequiredDrop = minRequiredDrop;
+
+   for(int i = startIndex; i <= endIndex; ++i)
+     {
+      const int barsBetween = p0Index - i - 1;
+      if(barsBetween < InpPreCondPriorDeclineMinBarsBetweenPre0AndP0)
+         continue;
+
+      const double pre0Price = NormalizePrice(pattern.symbol, GetRoleHigh(rates[i]));
+      const double drop = NormalizePrice(pattern.symbol, pre0Price - pattern.pointPrices[0]);
+      if(drop <= minRequiredDrop)
+         continue;
+
+      if(bestIndex < 0 || pre0Price > bestPrice || (pre0Price == bestPrice && i > bestIndex))
+        {
+         bestIndex = i;
+         bestPrice = pre0Price;
+         bestDrop = drop;
+         bestBarsBetween = barsBetween;
+        }
+     }
+
+   if(bestIndex < 0)
+      return(false);
+
+   pattern.preCondPriorDecline = true;
+   pattern.pre0Index = bestIndex;
+   pattern.pre0Time = rates[bestIndex].time;
+   pattern.pre0Price = bestPrice;
+   pattern.pre0Drop = bestDrop;
+   pattern.pre0BarsBetweenP0 = bestBarsBetween;
+   return(true);
+  }
+
+// Keep precondition evaluation isolated so future rules can be added without
+// growing the historical backbone filter into a single monolithic condition.
+bool EvaluatePatternPreconditions(MqlRates &rates[], PatternSnapshot &pattern)
+  {
+   return(EvaluatePriorDeclinePrecondition(rates, pattern));
+  }
+
 bool BuildHistoricalBackbone(const string symbol,
                              MqlRates &rates[],
                              const int i0,
@@ -712,11 +801,13 @@ bool BuildHistoricalBackbone(const string symbol,
    const double bSumValue = pattern.b1 + pattern.b2;
    pattern.condA = InRange(pattern.b1 / pattern.b2, InpCondAXMin, InpCondAXMax);
    pattern.condF = MaxSpanWithinLimit(pattern);
+   const bool preconditionsPassed = EvaluatePatternPreconditions(rates, pattern);
    return(pattern.condA &&
           pattern.condF &&
           pattern.a >= InpP1P2AValueSpaceMinPriceLimit &&
           p1p2BarCount >= InpP1P2AValueTimeMinKNumberLimit &&
-          bSumValue >= (InpBSumValueMinRatioOfAValue * pattern.a));
+          bSumValue >= (InpBSumValueMinRatioOfAValue * pattern.a) &&
+          preconditionsPassed);
   }
 
 bool AppendHistoricalCandidate(SymbolRuntimeState &state, const PatternSnapshot &pattern)
@@ -1004,9 +1095,11 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
    PrintFormat("EXACT_COMPARE_MISMATCH symbol=%s cached_valid=%s legacy_valid=%s "
                "cached_p3=%s cached_p4=%s cached_a=%.5f cached_b1=%.5f cached_b2=%.5f cached_c=%.5f "
                "cached_p1p2_bars=%d cached_bsum_ratio_of_a=%.5f "
+               "cached_precond=%s cached_pre0=%s cached_pre0_price=%.5f cached_pre0_drop=%.5f cached_pre0_min_drop=%.5f cached_pre0_bars_between=%d "
                "cached_spans=%d,%d,%d,%d "
                "legacy_p3=%s legacy_p4=%s legacy_a=%.5f legacy_b1=%.5f legacy_b2=%.5f legacy_c=%.5f "
                "legacy_p1p2_bars=%d legacy_bsum_ratio_of_a=%.5f "
+               "legacy_precond=%s legacy_pre0=%s legacy_pre0_price=%.5f legacy_pre0_drop=%.5f legacy_pre0_min_drop=%.5f legacy_pre0_bars_between=%d "
                "legacy_spans=%d,%d,%d,%d",
                state.symbol,
                cachedValid ? "true" : "false",
@@ -1019,6 +1112,12 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                cachedValid ? cachedMatch.c : 0.0,
                cachedValid ? (cachedMatch.pointSpans[1] + 1) : -1,
                (cachedValid && cachedMatch.a > 0.0) ? ((cachedMatch.b1 + cachedMatch.b2) / cachedMatch.a) : 0.0,
+               cachedValid && cachedMatch.preCondPriorDecline ? "true" : "false",
+               cachedValid ? FormatTime(cachedMatch.pre0Time) : "n/a",
+               cachedValid ? cachedMatch.pre0Price : 0.0,
+               cachedValid ? cachedMatch.pre0Drop : 0.0,
+               cachedValid ? cachedMatch.pre0MinRequiredDrop : 0.0,
+               cachedValid ? cachedMatch.pre0BarsBetweenP0 : -1,
                cachedValid ? cachedMatch.pointSpans[0] : -1,
                cachedValid ? cachedMatch.pointSpans[1] : -1,
                cachedValid ? cachedMatch.pointSpans[2] : -1,
@@ -1031,6 +1130,12 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                legacyValid ? legacyMatch.c : 0.0,
                legacyValid ? (legacyMatch.pointSpans[1] + 1) : -1,
                (legacyValid && legacyMatch.a > 0.0) ? ((legacyMatch.b1 + legacyMatch.b2) / legacyMatch.a) : 0.0,
+               legacyValid && legacyMatch.preCondPriorDecline ? "true" : "false",
+               legacyValid ? FormatTime(legacyMatch.pre0Time) : "n/a",
+               legacyValid ? legacyMatch.pre0Price : 0.0,
+               legacyValid ? legacyMatch.pre0Drop : 0.0,
+               legacyValid ? legacyMatch.pre0MinRequiredDrop : 0.0,
+               legacyValid ? legacyMatch.pre0BarsBetweenP0 : -1,
                legacyValid ? legacyMatch.pointSpans[0] : -1,
                legacyValid ? legacyMatch.pointSpans[1] : -1,
                legacyValid ? legacyMatch.pointSpans[2] : -1,
@@ -1064,6 +1169,13 @@ void ResetPattern(PatternSnapshot &pattern)
    pattern.r2 = 0.0;
    pattern.sspanmin = 0.0;
    pattern.triggerPatternTotalTimeMinute = 0.0;
+   pattern.preCondPriorDecline = false;
+   pattern.pre0Index = -1;
+   pattern.pre0Time = 0;
+   pattern.pre0Price = 0.0;
+   pattern.pre0Drop = 0.0;
+   pattern.pre0MinRequiredDrop = 0.0;
+   pattern.pre0BarsBetweenP0 = -1;
    pattern.condA = false;
    pattern.condB = false;
    pattern.condC = false;
@@ -1465,6 +1577,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
    PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
                "condB=%s r1=%.5f p3p4_drop_min_ratio=%.5f "
                "a_min_price=%.5f p1p2_min_bars=%d bsum_min_ratio_of_a=%.5f "
+               "prior_decline=%s pre0=(%s,%.5f) pre0_drop=%.5f pre0_min_drop=%.5f pre0_bars_between=%d "
                "spans=%d,%d,%d,%d p1p2_bars=%d bsum=%.5f bsum_ratio_of_a=%.5f "
                "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime,P5:Low,P6:High "
                "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f) "
@@ -1483,6 +1596,12 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                InpP1P2AValueSpaceMinPriceLimit,
                InpP1P2AValueTimeMinKNumberLimit,
                InpBSumValueMinRatioOfAValue,
+               pattern.preCondPriorDecline ? "true" : "false",
+               FormatTime(pattern.pre0Time),
+               pattern.pre0Price,
+               pattern.pre0Drop,
+               pattern.pre0MinRequiredDrop,
+               pattern.pre0BarsBetweenP0,
                pattern.pointSpans[0],
                pattern.pointSpans[1],
                pattern.pointSpans[2],
