@@ -1,29 +1,4 @@
-# mt5-kline-pattern-detection Specification
-
-## Purpose
-TBD - created by archiving change add-mt5-kline-pattern-strategy. Update Purpose after archive.
-## Requirements
-### Requirement: 从 MT5 K 线数据中识别 PRD 定义的 P0-P6 多头模式
-策略 SHALL 针对每个已配置的交易品种和周期分析已收盘的 bar，并识别满足 PRD 空间结构和时间结构的 P0 到 P6 候选点位。检测器 SHALL 为每个候选序列计算 `a`、`b1`、`b2`、`c`、`d`、`e`、`r1`、`r2`、`sspanmin`、`t1` 到 `t6`、`trigger_pattern_total_time_minute` 和 `tspanmin`。
-
-#### Scenario: 候选序列生成标准化模式快照
-- **WHEN** 某个交易品种拥有足够的已收盘 bar 来构成一组候选 P0-P6 序列
-- **THEN** 检测器会产出一份包含点位时间、点位价格、空间变量和时间变量的模式快照
-
-### Requirement: 强制执行可配置的点位取值与单段跨度规则
-策略 SHALL 支持 `InpAdjustPointMaxSpanKNumber` 来限制相邻点之间最多跨越的 K 线数量。与此同时，策略 SHALL 使用角色化点位规则来确定 `P0-P6` 的价格来源，而 SHALL NOT 再暴露 `PointValueTypeEnum` 作为统一点位取值模式。任何超过配置跨度的候选序列 SHALL 被拒绝。
-
-#### Scenario: 相邻点跨度超限时拒绝该序列
-- **WHEN** 某个候选序列中的任意相邻点对跨越的 K 线数量超过 `InpAdjustPointMaxSpanKNumber`
-- **THEN** 检测器拒绝该序列，且不会报告有效模式匹配
-
-#### Scenario: 使用单段跨度默认值
-- **WHEN** 操作人员未显式覆盖 `InpAdjustPointMaxSpanKNumber`
-- **THEN** 检测器使用默认值 `10` 作为每段相邻点之间允许跨越的最大 K 线数量
-
-#### Scenario: 检测器仅使用角色化点位规则
-- **WHEN** 本策略为候选序列计算 `P0-P6` 点位价格
-- **THEN** 检测器固定按角色化规则取值，而不会再读取统一的 `PointValueTypeEnum` 配置
+## MODIFIED Requirements
 
 ### Requirement: 仅在 CondA、CondB、CondC、CondF 与新增结构约束满足时确认完整匹配
 策略 SHALL 仅在以下条件全部满足时将某个形态视为完整匹配：`b1 = x * b2` 且落在配置的 `x` 系数范围内，`r1 = c / (a+b1+b2)` 且满足 `r1 >= InpP3P4DropMinRatioOfStructure`，`t4 < z * (t1 + t2 + t3)`，每个相邻点跨度都小于或等于 `InpAdjustPointMaxSpanKNumber`，`a >= InpP1P2AValueSpaceMinPriceLimit`，`P1-P2` 线段包含的 K 线数量（含 `P1` 与 `P2` 本身）大于或等于 `InpP1P2AValueTimeMinKNumberLimit`，`InpBSumValueMaxRatioOfAValue * a >= (b1+b2) >= InpBSumValueMinRatioOfAValue * a`，以及所有启用的 pattern preconditions 都通过。
