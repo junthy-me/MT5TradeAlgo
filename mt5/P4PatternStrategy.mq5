@@ -28,6 +28,7 @@ input double InpCondCZ = 1.0;
 input double InpP1P2AValueSpaceMinPriceLimit = 5.0;
 input int InpP1P2AValueTimeMinKNumberLimit = 3;
 input double InpBSumValueMinRatioOfAValue = 2.0;
+input double InpBSumValueMaxRatioOfAValue = 5.0;
 input int InpPreCondPriorDeclineLookbackBars = 20;
 input double InpPreCondPriorDeclineMinDropRatioOfStructure = 0.7;
 input int InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 = 0;
@@ -203,7 +204,19 @@ bool ValidateInputs()
 
    if(InpBSumValueMinRatioOfAValue < 0.0)
      {
-      Print("Invalid b-sum to a-value ratio threshold.");
+      Print("Invalid b-sum to a-value minimum ratio threshold.");
+      return(false);
+     }
+
+   if(InpBSumValueMaxRatioOfAValue < 0.0)
+     {
+      Print("Invalid b-sum to a-value maximum ratio threshold.");
+      return(false);
+     }
+
+   if(InpBSumValueMaxRatioOfAValue < InpBSumValueMinRatioOfAValue)
+     {
+      Print("Invalid b-sum ratio range: max must be greater than or equal to min.");
       return(false);
      }
 
@@ -799,15 +812,25 @@ bool BuildHistoricalBackbone(const string symbol,
 
    const int p1p2BarCount = pattern.pointSpans[1] + 1;
    const double bSumValue = pattern.b1 + pattern.b2;
+   const double bSumMinValue = InpBSumValueMinRatioOfAValue * pattern.a;
+   const double bSumMaxValue = InpBSumValueMaxRatioOfAValue * pattern.a;
    pattern.condA = InRange(pattern.b1 / pattern.b2, InpCondAXMin, InpCondAXMax);
    pattern.condF = MaxSpanWithinLimit(pattern);
    const bool preconditionsPassed = EvaluatePatternPreconditions(rates, pattern);
-   return(pattern.condA &&
-          pattern.condF &&
-          pattern.a >= InpP1P2AValueSpaceMinPriceLimit &&
-          p1p2BarCount >= InpP1P2AValueTimeMinKNumberLimit &&
-          bSumValue >= (InpBSumValueMinRatioOfAValue * pattern.a) &&
-          preconditionsPassed);
+   if(!(pattern.condA &&
+        pattern.condF &&
+        pattern.a >= InpP1P2AValueSpaceMinPriceLimit &&
+        p1p2BarCount >= InpP1P2AValueTimeMinKNumberLimit &&
+        preconditionsPassed))
+      return(false);
+
+   if(bSumValue < bSumMinValue)
+      return(false);
+
+   if(bSumValue > bSumMaxValue)
+      return(false);
+
+   return(true);
   }
 
 bool AppendHistoricalCandidate(SymbolRuntimeState &state, const PatternSnapshot &pattern)
@@ -1576,9 +1599,9 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
   {
    PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
                "condB=%s r1=%.5f p3p4_drop_min_ratio=%.5f "
-               "a_min_price=%.5f p1p2_min_bars=%d bsum_min_ratio_of_a=%.5f "
+               "a_min_price=%.5f p1p2_min_bars=%d bsum_min_ratio_of_a=%.5f bsum_max_ratio_of_a=%.5f "
                "prior_decline=%s pre0=(%s,%.5f) pre0_drop=%.5f pre0_min_drop=%.5f pre0_bars_between=%d "
-               "spans=%d,%d,%d,%d p1p2_bars=%d bsum=%.5f bsum_ratio_of_a=%.5f "
+               "spans=%d,%d,%d,%d p1p2_bars=%d bsum=%.5f bsum_min_allowed=%.5f bsum_max_allowed=%.5f bsum_ratio_of_a=%.5f "
                "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime,P5:Low,P6:High "
                "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f) "
                "a=%.5f b1=%.5f b2=%.5f c=%.5f r1=%.5f r2=%.5f t1=%.2f t2=%.2f t3=%.2f t4=%.2f total=%.2f",
@@ -1596,6 +1619,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                InpP1P2AValueSpaceMinPriceLimit,
                InpP1P2AValueTimeMinKNumberLimit,
                InpBSumValueMinRatioOfAValue,
+               InpBSumValueMaxRatioOfAValue,
                pattern.preCondPriorDecline ? "true" : "false",
                FormatTime(pattern.pre0Time),
                pattern.pre0Price,
@@ -1608,6 +1632,8 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                pattern.pointSpans[3],
                pattern.pointSpans[1] + 1,
                pattern.b1 + pattern.b2,
+               InpBSumValueMinRatioOfAValue * pattern.a,
+               InpBSumValueMaxRatioOfAValue * pattern.a,
                (pattern.a > 0.0) ? ((pattern.b1 + pattern.b2) / pattern.a) : 0.0,
                FormatTime(pattern.pointTimes[0]),
                pattern.pointPrices[0],
