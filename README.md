@@ -54,12 +54,12 @@
 
 策略每次轮询某个品种时，会先读取最近 `InpLookbackBars` 根已收盘 K 线，然后在最近窗口内枚举候选的 `P0/P1/P2/P3` 组合。
 
-相邻点之间允许跨越多根 K 线，但每一段都必须满足：
+相邻点之间允许跨越多根 K 线，但每一段都必须满足最小/最大跨度约束。这里的 `SpanKNumber` 只计算两点之间“中间间隔”的 K 线数量，不包含起点和终点所在的两根 K 线：
 
-- `P0 -> P1` 跨度 `<= InpAdjustPointMaxSpanKNumber`
-- `P1 -> P2` 跨度 `<= InpAdjustPointMaxSpanKNumber`
-- `P2 -> P3` 跨度 `<= InpAdjustPointMaxSpanKNumber`
-- `P3 -> 当前触发段` 预留跨度 `<= InpAdjustPointMaxSpanKNumber`
+- `P0 -> P1`：`InpAdjustPointMinSpanKNumber <= span <= InpAdjustPointMaxSpanKNumber`
+- `P1 -> P2`：`InpAdjustPointMinSpanKNumber <= span <= InpAdjustPointMaxSpanKNumber`
+- `P2 -> P3`：`InpAdjustPointMinSpanKNumber <= span <= InpAdjustPointMaxSpanKNumber`
+- `P3 -> 当前触发段`：`InpAdjustPointMinSpanKNumber <= span <= InpAdjustPointMaxSpanKNumber`
 
 同时，历史骨架必须满足基础拓扑关系：
 
@@ -74,7 +74,7 @@
 
 - `CondA`：`b1 / b2` 必须落在 `[InpCondAXMin, InpCondAXMax]`
 - `a` 的最小空间限制：`a >= InpP1P2AValueSpaceMinPriceLimit`
-- `P1 -> P2` 的最小持续 K 线数：`pointSpans[1] + 1 >= InpP1P2AValueTimeMinKNumberLimit`
+- `P1 -> P2` 的最小持续 K 线数：`pointSpans[1] + 2 >= InpP1P2AValueTimeMinKNumberLimit`
 - `b1 + b2` 的区间限制：
   - 下限：`b1 + b2 >= InpBSumValueMinRatioOfAValue * a`
   - 上限：`b1 + b2 <= InpBSumValueMaxRatioOfAValue * a`
@@ -112,7 +112,8 @@
 - 该品种刚刚强止损或弱止损，仍处于 `InpStopObservationBars` 定义的观察窗口内
 - 当前候选与“已经成功开过仓的历史骨架”共享同角色的 `P0/P1/P2/P3` 任一点
 - 当前由本 EA 管理的该品种持仓数已经达到 `InpMaxPositionsPerSymbol`
-- 当前 `ask` 已经低于强止损价，或者已经高于止盈价，说明信号已过时
+- 当前 `ask` 已经低于强止损价
+- 如果该模式已经拥有激活后的止盈位，则当前 `ask` 已经高于止盈价，说明信号已过时
 
 只要止盈观察窗口或止损观察窗口任意一个仍未结束，就不会开新单。通过全部门控后，策略才会发出市价买单。
 
@@ -134,15 +135,14 @@
 
 持仓后只要实时 `bid <= hardLossPrice`，策略就会平仓。
 
-### 初始止盈
+### 止盈激活
 
-开仓后的初始止盈价格为：
+当前实现里，开仓后不会立刻设置止盈位：
 
-- `profitPrice = P4 + InpProfitC * (a + b1 + b2)`
+- 开仓时只有 `hardLossPrice = P0`
+- `profitPrice` 在首次合格 `P5/P6` 出现前处于未激活状态
 
-默认 `InpProfitC = 0.6`。
-
-这和最初 PRD 中的 `买入价 + profitC * a` 不同，当前实现使用的是整个前序结构 `a + b1 + b2`。
+也就是说，如果一笔单子始终没有走出合格 `P5/P6`，它将只受强止损管理，不会有 `profit_target`。
 
 ### 弱止损
 
@@ -156,7 +156,7 @@
 - `d = P4 - P5`
 - `e = P6 - P5`
 
-只有满足下面条件，弱止损和二次止盈改写才会首次激活：
+只有满足下面条件，弱止损和止盈才会首次激活：
 
 - `e >= InpP5P6ReboundMinRatioOfP3P5Drop * (c + d)`
 
@@ -169,7 +169,7 @@
 
 一旦首次激活完成，这两个价位会被冻结，后续即使再出现新的 `P5/P6` 组合，也不会继续改写。
 
-如果实时 `bid <= softLossPrice`，则按 `soft_stop` 平仓；如果实时 `bid >=` 当前生效的 `profitPrice`，则按 `profit_target` 平仓。
+如果实时 `bid <= softLossPrice`，则按 `soft_stop` 平仓；如果实时 `bid >=` 当前已激活的 `profitPrice`，则按 `profit_target` 平仓。
 
 ### 观察窗口
 
@@ -197,7 +197,8 @@
 | `InpProfitObservationBars` | `30` | 止盈后观察窗口 bar 数 | 观察期内阻止新开仓 |
 | `InpStopObservationBars` | `30` | 止损后观察窗口 bar 数 | `hard_stop` 或 `soft_stop` 后观察期内阻止新开仓 |
 | `InpLookbackBars` | `300` | 回看已收盘 K 线数量 | 限制历史骨架搜索范围 |
-| `InpAdjustPointMaxSpanKNumber` | `10` | 相邻点允许的最大 K 线跨度 | 限制 `P0-P3` 各段跨度 |
+| `InpAdjustPointMinSpanKNumber` | `5` | 相邻点之间最少中间 K 线数 | 限制 `P0-P4` 各段跨度下限 |
+| `InpAdjustPointMaxSpanKNumber` | `30` | 相邻点之间最多中间 K 线数 | 限制 `P0-P4` 各段跨度上限 |
 
 ### 历史骨架过滤参数
 
@@ -206,7 +207,7 @@
 | `InpCondAXMin` | `0.75` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
 | `InpCondAXMax` | `1.25` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
 | `InpP1P2AValueSpaceMinPriceLimit` | `5.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
-| `InpP1P2AValueTimeMinKNumberLimit` | `3` | `P1->P2` 最小 K 线数 | 要求 `pointSpans[1] + 1 >= 该值` |
+| `InpP1P2AValueTimeMinKNumberLimit` | `3` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
 | `InpBSumValueMinRatioOfAValue` | `2.0` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
 | `InpBSumValueMaxRatioOfAValue` | `5.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
 | `InpPreCondPriorDeclineLookbackBars` | `20` | `Pre0` 前置下跌回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
@@ -221,8 +222,7 @@
 | `InpCondCZ` | `1.0` | `CondC` 系数 | 要求 `t4 < 该值 * (t1+t2+t3)` |
 | `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.65` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
 | `InpSoftLossC` | `1.0` | 弱止损价系数 | `softLossPrice = 该值 * selectedP5` |
-| `InpProfitC` | `0.6` | 止盈系数 | `profitPrice = P4 + 该值 * (a+b1+b2)` |
-| `InpP5AnchoredProfitC` | `0.7` | `P5` 锚定止盈系数 | 首次 `P5/P6` 激活后，`profitPrice = selectedP5 + 该值 * (a+b1+b2)` |
+| `InpP5AnchoredProfitC` | `0.7` | 唯一止盈系数 | 首次 `P5/P6` 激活后，`profitPrice = selectedP5 + 该值 * (a+b1+b2)` |
 | `InpEnableExactSearchCompare` | `false` | 调试开关 | 打开后会对比缓存搜索和精确搜索结果，仅用于诊断 |
 
 ## 当前实现与最初 PRD 的主要差异
@@ -235,8 +235,8 @@
 - 独立的旧 `CondD` 不再参与过滤；代码里 `condD` 仅保留为结构字段，当前恒为 `true`
 - 旧的 `tspanmin` 门槛不再作为入场条件，当前改为 `a` 的最小空间、`P1-P2` 最小时长、`b1+b2` 区间和 `Pre0` 前置下跌先决条件
 - 强止损改为 `P0`
-- 初始止盈改为基于 `a+b1+b2`
-- 首次 `P5/P6` 激活后，止盈会改写为基于最低合格 `P5` 的二次止盈
+- 开仓时不再设置初始止盈；只有首次合格 `P5/P6` 出现后才会激活唯一止盈位
+- 首次 `P5/P6` 激活后，止盈基于最低合格 `P5`
 - 弱止损激活条件改为 `e >= 阈值 * (c+d)`
 - 止盈后和止损后都有独立观察窗口，且任一窗口有效时都禁止新开仓
 
@@ -246,7 +246,7 @@
 
 策略在开仓和平仓时会打印完整日志，重点字段包括：
 
-- 开仓日志 `ENTRY`：会输出 `P0-P4` 时间和价格、`a/b1/b2/c`、`t1-t4`、`Pre0` 信息、止盈止损价和结构过滤阈值
+- 开仓日志 `ENTRY`：会输出 `P0-P4` 时间和价格、`a/b1/b2/c`、`t1-t4`、`Pre0` 信息、止盈是否已激活、止损价和结构过滤阈值
 - 平仓日志 `EXIT`：会输出 `P4/P5/P6` 时间和价格、`d/e`、`t5/t6` 以及平仓原因
 - 阻止日志：会明确区分是被 `P4` 同 bar 锁、止盈观察窗口、止损观察窗口、双观察窗口重叠、共享骨架成功锁，还是持仓上限拦截
 

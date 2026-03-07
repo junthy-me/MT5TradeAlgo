@@ -20,7 +20,8 @@ input int InpSlippagePoints = 20;
 input int InpProfitObservationBars = 30;
 input int InpStopObservationBars = 30;
 input int InpLookbackBars = 300;
-input int InpAdjustPointMaxSpanKNumber = 10;
+input int InpAdjustPointMinSpanKNumber = 5;
+input int InpAdjustPointMaxSpanKNumber = 30;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
@@ -36,7 +37,6 @@ input int InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 = 0;
 
 input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.65;
 input double InpSoftLossC = 1.0;
-input double InpProfitC = 0.6;
 input double InpP5AnchoredProfitC = 0.7;
 input bool InpEnableExactSearchCompare = false;
 
@@ -73,6 +73,7 @@ struct PatternSnapshot
    bool              condC;
    bool              condD;
    bool              condF;
+   bool              profitTargetActive;
    double            referenceEntryPrice;
    double            hardLossPrice;
    double            softLossPrice;
@@ -189,9 +190,15 @@ bool ValidateInputs()
       return(false);
      }
 
-   if(InpAdjustPointMaxSpanKNumber < 1 || InpLookbackBars < 16)
+   if(InpAdjustPointMinSpanKNumber < 0 || InpAdjustPointMaxSpanKNumber < 0 || InpAdjustPointMinSpanKNumber > InpAdjustPointMaxSpanKNumber)
      {
-      Print("Lookback or point span settings are too small.");
+      Print("Invalid min/max point span settings.");
+      return(false);
+     }
+
+   if(InpLookbackBars < ((InpAdjustPointMaxSpanKNumber + 1) * 4))
+     {
+      Print("Lookback bars are too small for the configured max point span.");
       return(false);
      }
 
@@ -782,7 +789,7 @@ bool LoadClosedRates(const string symbol, MqlRates &rates[])
 
    ArrayResize(rates, copied);
    ArraySetAsSeries(rates, false);
-  return(copied >= (InpAdjustPointMaxSpanKNumber * 4 + 1));
+   return(copied >= ((InpAdjustPointMaxSpanKNumber + 1) * 4));
   }
 
 bool HasNewProcessableTick(SymbolRuntimeState &state, const MqlTick &tick)
@@ -922,10 +929,10 @@ bool BuildHistoricalBackbone(const string symbol,
    pattern.pointPrices[2] = NormalizePrice(symbol, p2);
    pattern.pointPrices[3] = NormalizePrice(symbol, p3);
 
-   pattern.pointSpans[0] = i1 - i0;
-   pattern.pointSpans[1] = i2 - i1;
-   pattern.pointSpans[2] = i3 - i2;
-   pattern.pointSpans[3] = (latestClosedIndex - i3) + 1;
+   pattern.pointSpans[0] = MiddleBarCountBetweenIndexes(i0, i1);
+   pattern.pointSpans[1] = MiddleBarCountBetweenIndexes(i1, i2);
+   pattern.pointSpans[2] = MiddleBarCountBetweenIndexes(i2, i3);
+   pattern.pointSpans[3] = MiddleBarCountBetweenIndexes(i3, latestClosedIndex + 1);
 
    pattern.a = NormalizePrice(symbol, a);
    pattern.b1 = NormalizePrice(symbol, b1);
@@ -942,7 +949,7 @@ bool BuildHistoricalBackbone(const string symbol,
    pattern.t[2] = MinutesBetween(pattern.pointTimes[2], pattern.pointTimes[3]);
    pattern.triggerPatternTotalTimeMinute = pattern.t[0] + pattern.t[1] + pattern.t[2];
 
-   const int p1p2BarCount = pattern.pointSpans[1] + 1;
+   const int p1p2BarCount = SpanToInclusiveBarCount(pattern.pointSpans[1]);
    const double bSumValue = pattern.b1 + pattern.b2;
    const double bSumMinValue = InpBSumValueMinRatioOfAValue * pattern.a;
    const double bSumMaxValue = InpBSumValueMaxRatioOfAValue * pattern.a;
@@ -983,16 +990,16 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
    if(latest < 3)
       return;
 
-   const int span = InpAdjustPointMaxSpanKNumber;
+   const int maxIndexDistance = MaxPointIndexDistance();
    int p0Candidates[];
    int p1Candidates[];
    int p2Candidates[];
    int p3Candidates[];
 
-   CollectCandidateIndexes(latest - (span * 4) + 1, latest - 3, p0Candidates);
-   CollectCandidateIndexes(latest - (span * 3) + 1, latest - 2, p1Candidates);
-   CollectCandidateIndexes(latest - (span * 2) + 1, latest - 1, p2Candidates);
-   CollectCandidateIndexes(latest - span + 1, latest, p3Candidates);
+   CollectCandidateIndexes(latest - (maxIndexDistance * 4) + 1, latest - 3, p0Candidates);
+   CollectCandidateIndexes(latest - (maxIndexDistance * 3) + 1, latest - 2, p1Candidates);
+   CollectCandidateIndexes(latest - (maxIndexDistance * 2) + 1, latest - 1, p2Candidates);
+   CollectCandidateIndexes(latest - maxIndexDistance + 1, latest, p3Candidates);
 
    for(int p3Cursor = 0; p3Cursor < ArraySize(p3Candidates); ++p3Cursor)
      {
@@ -1002,7 +1009,7 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
       for(int p2Cursor = 0; p2Cursor < ArraySize(p2Candidates); ++p2Cursor)
         {
          const int i2 = p2Candidates[p2Cursor];
-         if(i2 >= i3 || (i3 - i2) > span)
+         if(!IsPointSpanWithinConfiguredRange(i2, i3))
             continue;
 
          const double p2 = GetRoleLow(rates[i2]);
@@ -1012,7 +1019,7 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
          for(int p1Cursor = 0; p1Cursor < ArraySize(p1Candidates); ++p1Cursor)
            {
             const int i1 = p1Candidates[p1Cursor];
-            if(i1 >= i2 || (i2 - i1) > span)
+            if(!IsPointSpanWithinConfiguredRange(i1, i2))
                continue;
 
             const double p1 = GetRoleHigh(rates[i1]);
@@ -1029,7 +1036,7 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
             for(int p0Cursor = 0; p0Cursor < ArraySize(p0Candidates); ++p0Cursor)
               {
                const int i0 = p0Candidates[p0Cursor];
-               if(i0 >= i1 || (i1 - i0) > span)
+               if(!IsPointSpanWithinConfiguredRange(i0, i1))
                   continue;
 
                const double p0 = GetRoleLow(rates[i0]);
@@ -1115,8 +1122,8 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
    pattern.referenceEntryPrice = pattern.pointPrices[4];
    pattern.hardLossPrice = pattern.pointPrices[0];
    pattern.softLossPrice = 0.0;
-   pattern.profitPrice = NormalizePrice(pattern.symbol,
-                                        pattern.referenceEntryPrice + InpProfitC * (pattern.b1 + pattern.b2 + pattern.a));
+   pattern.profitTargetActive = false;
+   pattern.profitPrice = 0.0;
    return(true);
   }
 
@@ -1174,15 +1181,24 @@ bool FindLatestPatternLegacyExact(const string symbol,
    PatternSnapshot best;
    ResetPattern(best);
 
-   const int span = InpAdjustPointMaxSpanKNumber;
-   for(int i3 = latest; i3 >= MathMax(0, latest - span + 1); --i3)
+   const int maxIndexDistance = MaxPointIndexDistance();
+   for(int i3 = latest; i3 >= MathMax(0, latest - maxIndexDistance + 1); --i3)
      {
-      for(int i2 = i3 - 1; i2 >= MathMax(0, i3 - span); --i2)
+      for(int i2 = i3 - 1; i2 >= MathMax(0, i3 - maxIndexDistance); --i2)
         {
-         for(int i1 = i2 - 1; i1 >= MathMax(0, i2 - span); --i1)
+         if(!IsPointSpanWithinConfiguredRange(i2, i3))
+            continue;
+
+         for(int i1 = i2 - 1; i1 >= MathMax(0, i2 - maxIndexDistance); --i1)
            {
-            for(int i0 = i1 - 1; i0 >= MathMax(0, i1 - span); --i0)
+            if(!IsPointSpanWithinConfiguredRange(i1, i2))
+               continue;
+
+            for(int i0 = i1 - 1; i0 >= MathMax(0, i1 - maxIndexDistance); --i0)
               {
+               if(!IsPointSpanWithinConfiguredRange(i0, i1))
+                  continue;
+
                PatternSnapshot backbone;
                if(!BuildHistoricalBackbone(symbol, rates, i0, i1, i2, i3, latest, backbone))
                   continue;
@@ -1265,7 +1281,7 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                cachedValid ? cachedMatch.b1 : 0.0,
                cachedValid ? cachedMatch.b2 : 0.0,
                cachedValid ? cachedMatch.c : 0.0,
-               cachedValid ? (cachedMatch.pointSpans[1] + 1) : -1,
+               cachedValid ? SpanToInclusiveBarCount(cachedMatch.pointSpans[1]) : -1,
                (cachedValid && cachedMatch.a > 0.0) ? ((cachedMatch.b1 + cachedMatch.b2) / cachedMatch.a) : 0.0,
                cachedValid && cachedMatch.preCondPriorDecline ? "true" : "false",
                cachedValid ? FormatTime(cachedMatch.pre0Time) : "n/a",
@@ -1283,7 +1299,7 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                legacyValid ? legacyMatch.b1 : 0.0,
                legacyValid ? legacyMatch.b2 : 0.0,
                legacyValid ? legacyMatch.c : 0.0,
-               legacyValid ? (legacyMatch.pointSpans[1] + 1) : -1,
+               legacyValid ? SpanToInclusiveBarCount(legacyMatch.pointSpans[1]) : -1,
                (legacyValid && legacyMatch.a > 0.0) ? ((legacyMatch.b1 + legacyMatch.b2) / legacyMatch.a) : 0.0,
                legacyValid && legacyMatch.preCondPriorDecline ? "true" : "false",
                legacyValid ? FormatTime(legacyMatch.pre0Time) : "n/a",
@@ -1336,6 +1352,7 @@ void ResetPattern(PatternSnapshot &pattern)
    pattern.condC = false;
    pattern.condD = false;
    pattern.condF = false;
+   pattern.profitTargetActive = false;
    pattern.referenceEntryPrice = 0.0;
    pattern.hardLossPrice = 0.0;
    pattern.softLossPrice = 0.0;
@@ -1354,11 +1371,43 @@ bool InRange(const double value, const double minValue, const double maxValue)
    return(value >= minValue && value <= maxValue);
   }
 
+int MiddleBarCountBetweenIndexes(const int startIndex, const int endIndex)
+  {
+   if(endIndex <= startIndex)
+      return(-1);
+   return(endIndex - startIndex - 1);
+  }
+
+int MaxPointIndexDistance()
+  {
+   return(InpAdjustPointMaxSpanKNumber + 1);
+  }
+
+int SpanToInclusiveBarCount(const int middleBarCount)
+  {
+   if(middleBarCount < 0)
+      return(0);
+   return(middleBarCount + 2);
+  }
+
+bool IsPointSpanWithinConfiguredRange(const int startIndex, const int endIndex)
+  {
+   const int span = MiddleBarCountBetweenIndexes(startIndex, endIndex);
+   if(span < 0)
+      return(false);
+   return(span >= InpAdjustPointMinSpanKNumber && span <= InpAdjustPointMaxSpanKNumber);
+  }
+
+bool IsProfitTargetActive(const PatternSnapshot &pattern)
+  {
+   return(pattern.profitTargetActive);
+  }
+
 bool MaxSpanWithinLimit(const PatternSnapshot &pattern)
   {
    for(int i = 0; i < 4; ++i)
      {
-      if(pattern.pointSpans[i] > InpAdjustPointMaxSpanKNumber)
+      if(pattern.pointSpans[i] < InpAdjustPointMinSpanKNumber || pattern.pointSpans[i] > InpAdjustPointMaxSpanKNumber)
          return(false);
      }
    return(true);
@@ -1465,8 +1514,8 @@ bool FindLowestQualifiedP5ActivationCandidate(const ManagedPositionState &state,
       candidate.p6Time = rates[bestP6Index].time;
       candidate.p5Price = p5Price;
       candidate.p6Price = bestP6Price;
-      candidate.p5Span = p5Index - searchStartIndex + 1;
-      candidate.p6Span = bestP6Index - p5Index;
+      candidate.p5Span = MiddleBarCountBetweenIndexes(searchStartIndex - 1, p5Index);
+      candidate.p6Span = MiddleBarCountBetweenIndexes(p5Index, bestP6Index);
       candidate.d = d;
       candidate.e = e;
       candidate.t5 = MinutesBetween(state.snapshot.pointTimes[4], candidate.p5Time);
@@ -1524,7 +1573,7 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
       return;
      }
 
-   if(tick.ask >= pattern.profitPrice)
+   if(IsProfitTargetActive(pattern) && tick.ask >= pattern.profitPrice)
      {
       PrintFormat("Skipping stale pattern because current ask is already beyond target. symbol=%s p4_bar=%s ask=%.5f target=%.5f",
                   pattern.symbol,
@@ -1689,7 +1738,8 @@ void ManageOpenPositions(const string symbol)
          continue;
         }
 
-      if(currentBid >= g_positionStates[i].snapshot.profitPrice)
+      if(IsProfitTargetActive(g_positionStates[i].snapshot) &&
+         currentBid >= g_positionStates[i].snapshot.profitPrice)
         {
          CloseManagedPosition(i, "profit_target", currentBid);
          continue;
@@ -1727,6 +1777,7 @@ void UpdateSoftStopState(ManagedPositionState &state)
    state.snapshot.t[5] = candidate.t6;
    state.snapshot.softLossPrice = candidate.softLossPrice;
    state.snapshot.profitPrice = candidate.profitPrice;
+   state.snapshot.profitTargetActive = true;
    state.softStopActive = true;
    state.p5ActivationFrozen = true;
 
@@ -1789,7 +1840,7 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
 
 void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const string orderComment, const ulong ticket)
   {
-   PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
+   PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit_active=%s profit=%.5f "
                "condB=%s r1=%.5f p3p4_drop_min_ratio=%.5f "
                "a_min_price=%.5f p1p2_min_bars=%d bsum_min_ratio_of_a=%.5f bsum_max_ratio_of_a=%.5f "
                "prior_decline=%s pre0=(%s,%.5f) pre0_drop=%.5f pre0_min_drop=%.5f pre0_bars_between=%d "
@@ -1804,6 +1855,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                executedPrice,
                pattern.referenceEntryPrice,
                pattern.hardLossPrice,
+               pattern.profitTargetActive ? "true" : "false",
                pattern.profitPrice,
                pattern.condB ? "true" : "false",
                pattern.r1,
@@ -1822,7 +1874,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                pattern.pointSpans[1],
                pattern.pointSpans[2],
                pattern.pointSpans[3],
-               pattern.pointSpans[1] + 1,
+               SpanToInclusiveBarCount(pattern.pointSpans[1]),
                pattern.b1 + pattern.b2,
                InpBSumValueMinRatioOfAValue * pattern.a,
                InpBSumValueMaxRatioOfAValue * pattern.a,
@@ -1852,7 +1904,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
 
 void LogExit(const ManagedPositionState &state, const string reason, const double executedPrice)
   {
-   PrintFormat("EXIT symbol=%s ticket=%I64u reason=%s p4_bar=%s executed=%.5f hard_loss=%.5f soft_loss=%.5f profit=%.5f "
+   PrintFormat("EXIT symbol=%s ticket=%I64u reason=%s p4_bar=%s executed=%.5f hard_loss=%.5f soft_loss=%.5f profit_active=%s profit=%.5f "
                "source=P4:Realtime,P5:Low,P6:High "
                "P4=(%s,%.5f) P5=(%s,%.5f) P6=(%s,%.5f) d=%.5f e=%.5f t5=%.2f t6=%.2f",
                state.symbol,
@@ -1862,6 +1914,7 @@ void LogExit(const ManagedPositionState &state, const string reason, const doubl
                executedPrice,
                state.snapshot.hardLossPrice,
                state.snapshot.softLossPrice,
+               state.snapshot.profitTargetActive ? "true" : "false",
                state.snapshot.profitPrice,
                FormatTime(state.snapshot.pointTimes[4]),
                state.snapshot.pointPrices[4],
