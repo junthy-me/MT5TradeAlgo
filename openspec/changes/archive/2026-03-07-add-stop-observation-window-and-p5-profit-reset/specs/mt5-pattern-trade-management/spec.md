@@ -1,34 +1,4 @@
-# mt5-pattern-trade-management Specification
-
-## Purpose
-TBD - created by archiving change add-mt5-kline-pattern-strategy. Update Purpose after archive.
-## Requirements
-### Requirement: 基于完整匹配形态触发买入交易
-策略 SHALL 仅在收到完整匹配的模式快照后创建买入交易机会。交易参考入场价 SHALL 为匹配得到的 P4 价格，并且策略 SHALL 在发单前推导 `hard_loss_price = P0` 点位值与 `profit_price = entry_price + InpProfitC * (b1+b2+a)`。此外，对于同一个 `symbol + timeframe` 的当前 `P4` 所属未收盘 K 线周期，策略 SHALL 最多只允许一次成功创建新的由 EA 管理的多头仓位；只有在开仓流程最终确认新仓位已经存在并被纳入 EA 管理后，策略才 SHALL 将该 bar 标记为已消耗。如果本次尝试在创建受管仓位之前被噪声过滤、风控检查或经纪商拒单阻止，策略 SHALL 不锁定当前 bar，并允许同一 bar 后续新的有效尝试继续进入开仓流程。与此同时，如果多个不同的 `P4` K 线柱与更早某个已成功骨架在 `P0/P1/P2/P3` 中任意一个同角色历史点位重叠，即 `P0==P0 || P1==P1 || P2==P2 || P3==P3`，则策略 SHALL 在该骨架首次成功创建受管仓位之前允许这些后续 `P4` K 线柱继续尝试；一旦某个 `P4` K 线柱已经为该共享骨架成功创建过受管仓位，后续共享同一骨架的 `P4` K 线柱即使仍满足条件，也 SHALL 被直接阻止。不同角色点位即使落在同一根 K 线柱上，也 SHALL NOT 视为共享骨架命中。
-
-#### Scenario: 交易价位由 P4、P0 和整体结构振幅推导
-- **WHEN** 检测器输出一条完整模式匹配
-- **THEN** 策略使用匹配得到的 P4 价格、P0 点位值以及 `a`、`b1`、`b2` 推导入场价、强止损价和止盈价
-
-#### Scenario: 同一 P4 当前 bar 仅首次成功开仓
-- **WHEN** 某个 `symbol + timeframe` 在当前未收盘 `P4` bar 内已经成功创建过一笔由 EA 管理的新仓位
-- **THEN** 策略不会在该 bar 剩余时间内再次为同一 `symbol + timeframe` 提交新的买单
-
-#### Scenario: 同一 P4 当前 bar 内失败尝试不锁定 bar
-- **WHEN** 某次候选入场在当前未收盘 `P4` bar 内通过了模式匹配，但在受管仓位创建完成前被噪声过滤、风控检查或经纪商拒单阻止
-- **THEN** 策略保持该 `P4` bar 可再次尝试开仓，并允许后续仍在该 bar 内的有效候选继续进入开仓流程
-
-#### Scenario: 只共享一个同角色历史点位也视为共享骨架
-- **WHEN** 当前候选 `P4` 所依赖的 `P0/P1/P2/P3` 与更早某个已成功骨架相比，仅有其中一个同角色历史点位时间相同
-- **THEN** 策略仍将它们视为共享骨架，而不要求四个历史点位全部相同
-
-#### Scenario: 跨角色共享同一根 K 线柱不视为共享骨架
-- **WHEN** 当前候选骨架中的某个历史点位时间仅与更早已成功骨架的不同角色点位时间相同，例如当前 `P1` 时间等于更早骨架的 `P2` 时间
-- **THEN** 策略不会仅因为这类跨角色时间相同就把它们视为共享骨架
-
-#### Scenario: 共享任一点位的骨架在首次成功后后续 P4 bar 不再下单
-- **WHEN** 当前候选 `P4` 与更早某个已经成功创建受管仓位的骨架在 `P0/P1/P2/P3` 中任意一个历史点位重叠，且当前已经进入更晚的 `P4` K 线柱
-- **THEN** 策略不会再为该共享骨架的后续 `P4` K 线柱提交新的买单
+## MODIFIED Requirements
 
 ### Requirement: 仅在入场后确认条件满足时激活弱止损
 策略 SHALL 在入场时保持弱止损未激活。只有在持仓首次出现满足 `e >= n * (c + d)` 的合格 `P5/P6` 候选集合时，策略才 SHALL 执行一次性激活流程：从该时刻全部合格 `P5` 候选中选择价格最低的 `selectedP5`，按 `soft_loss_price = InpSoftLossC * selectedP5` 激活弱止损，并同时将止盈价改写为 `profit_price = selectedP5 + InpP5AnchoredProfitC * (a+b1+b2)`。一旦完成这次首次激活，策略 SHALL 冻结该持仓的 `selectedP5`、`soft_loss_price` 和 `profit_price`，后续新的 `P5/P6` 组合 SHALL NOT 再次改写这些价位。
@@ -90,14 +60,3 @@ TBD - created by archiving change add-mt5-kline-pattern-strategy. Update Purpose
 #### Scenario: 观察窗口结束后恢复允许入场
 - **WHEN** 当前 `symbol + timeframe` 已经同时超过最近一次止盈观察窗口和止损观察窗口所覆盖的 bar 范围
 - **THEN** 策略恢复允许该 `symbol + timeframe` 的新买单继续进入后续入场门控
-
-### Requirement: 记录匹配变量和交易生命周期日志
-策略 SHALL 在每次发起交易时输出匹配点位价格、点位时间、空间变量、时间变量以及衍生交易价位。策略在持仓平仓时也 SHALL 记录出场原因和实际成交价格。
-
-#### Scenario: 开仓日志包含完整模式快照
-- **WHEN** 策略基于一次匹配形态提交买单
-- **THEN** 日志输出包含用于本次决策的点位信息、空间变量、时间变量和衍生风控价位
-
-#### Scenario: 平仓日志记录出场原因
-- **WHEN** 策略关闭一个由 EA 管理的持仓
-- **THEN** 日志输出包含此次平仓是由强止损、弱止损还是止盈触发，以及实际平仓成交价

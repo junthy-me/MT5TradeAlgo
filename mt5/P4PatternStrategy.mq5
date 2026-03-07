@@ -18,6 +18,7 @@ input double InpFixedLots = 0.05;
 input int InpMaxPositionsPerSymbol = 1;
 input int InpSlippagePoints = 20;
 input int InpProfitObservationBars = 30;
+input int InpStopObservationBars = 30;
 input int InpLookbackBars = 300;
 input int InpAdjustPointMaxSpanKNumber = 10;
 
@@ -36,6 +37,7 @@ input int InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 = 0;
 input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.65;
 input double InpSoftLossC = 1.0;
 input double InpProfitC = 0.6;
+input double InpP5AnchoredProfitC = 0.7;
 input bool InpEnableExactSearchCompare = false;
 
 struct PatternSnapshot
@@ -98,6 +100,7 @@ struct SymbolRuntimeState
    double            lastEvaluatedP4Price;
    datetime          lastSuccessfulEntryBarTime;
    datetime          lastProfitTargetExitBarTime;
+   datetime          lastStopExitBarTime;
    int               backboneSuccessCount;
    BackboneSuccessState backboneSuccesses[];
   };
@@ -110,6 +113,26 @@ struct ManagedPositionState
    datetime          openedAt;
    PatternSnapshot   snapshot;
    bool              softStopActive;
+   bool              p5ActivationFrozen;
+  };
+
+struct P5ActivationCandidate
+  {
+   bool              valid;
+   int               p5Index;
+   int               p6Index;
+   datetime          p5Time;
+   datetime          p6Time;
+   double            p5Price;
+   double            p6Price;
+   int               p5Span;
+   int               p6Span;
+   double            d;
+   double            e;
+   double            t5;
+   double            t6;
+   double            softLossPrice;
+   double            profitPrice;
   };
 
 CTrade trade;
@@ -178,6 +201,12 @@ bool ValidateInputs()
       return(false);
      }
 
+   if(InpStopObservationBars < 0)
+     {
+      Print("InpStopObservationBars must be greater than or equal to 0.");
+      return(false);
+     }
+
    if(InpCondAXMin <= 0.0 || InpCondAXMax <= 0.0 || InpCondAXMin > InpCondAXMax)
      {
       Print("Invalid CondA range.");
@@ -235,6 +264,12 @@ bool ValidateInputs()
    if(InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 < 0)
      {
       Print("Invalid prior decline precondition minimum bars between Pre0 and P0.");
+      return(false);
+     }
+
+   if(InpP5AnchoredProfitC < 0.0)
+     {
+      Print("InpP5AnchoredProfitC must be greater than or equal to 0.");
       return(false);
      }
 
@@ -328,13 +363,45 @@ void ProcessSymbol(const string symbol)
    g_symbolStates[stateIndex].lastEvaluatedP4Price = match.pointPrices[4];
 
    datetime lastProfitTargetExitBarTime = 0;
-   int blockedBarsRemaining = 0;
-   if(IsProfitObservationLocked(g_symbolStates[stateIndex], symbol, currentBarTime, lastProfitTargetExitBarTime, blockedBarsRemaining))
+   datetime lastStopExitBarTime = 0;
+   int profitBlockedBarsRemaining = 0;
+   int stopBlockedBarsRemaining = 0;
+   const bool profitObservationLocked = IsProfitObservationLocked(g_symbolStates[stateIndex],
+                                                                  symbol,
+                                                                  currentBarTime,
+                                                                  lastProfitTargetExitBarTime,
+                                                                  profitBlockedBarsRemaining);
+   const bool stopObservationLocked = IsStopObservationLocked(g_symbolStates[stateIndex],
+                                                              symbol,
+                                                              currentBarTime,
+                                                              lastStopExitBarTime,
+                                                              stopBlockedBarsRemaining);
+   if(profitObservationLocked && stopObservationLocked)
+     {
+      LogEntryBlockedByObservationWindows(symbol,
+                                          currentBarTime,
+                                          lastProfitTargetExitBarTime,
+                                          profitBlockedBarsRemaining,
+                                          lastStopExitBarTime,
+                                          stopBlockedBarsRemaining);
+      return;
+     }
+
+   if(profitObservationLocked)
      {
       LogEntryBlockedByProfitObservation(symbol,
                                          currentBarTime,
                                          lastProfitTargetExitBarTime,
-                                         blockedBarsRemaining);
+                                         profitBlockedBarsRemaining);
+      return;
+     }
+
+   if(stopObservationLocked)
+     {
+      LogEntryBlockedByStopObservation(symbol,
+                                       currentBarTime,
+                                       lastStopExitBarTime,
+                                       stopBlockedBarsRemaining);
       return;
      }
 
@@ -409,24 +476,53 @@ bool IsP4BarLocked(const SymbolRuntimeState &state, const datetime currentBarTim
    return(currentBarTime > 0 && state.lastSuccessfulEntryBarTime == currentBarTime);
   }
 
+bool IsObservationLocked(const datetime lastExitBarTime,
+                         const string symbol,
+                         const datetime currentBarTime,
+                         const int configuredBars,
+                         datetime &resolvedExitBarTime,
+                         int &blockedBarsRemaining)
+  {
+   resolvedExitBarTime = lastExitBarTime;
+   blockedBarsRemaining = 0;
+
+   if(configuredBars <= 0 || currentBarTime <= 0 || resolvedExitBarTime <= 0)
+      return(false);
+
+   const int exitBarShift = iBarShift(symbol, InpTF, resolvedExitBarTime, false);
+   if(exitBarShift < 0 || exitBarShift > configuredBars)
+      return(false);
+
+   blockedBarsRemaining = configuredBars - exitBarShift;
+   return(true);
+  }
+
 bool IsProfitObservationLocked(const SymbolRuntimeState &state,
                                const string symbol,
                                const datetime currentBarTime,
                                datetime &lastProfitTargetExitBarTime,
                                int &blockedBarsRemaining)
   {
-   lastProfitTargetExitBarTime = state.lastProfitTargetExitBarTime;
-   blockedBarsRemaining = 0;
+   return(IsObservationLocked(state.lastProfitTargetExitBarTime,
+                              symbol,
+                              currentBarTime,
+                              InpProfitObservationBars,
+                              lastProfitTargetExitBarTime,
+                              blockedBarsRemaining));
+  }
 
-   if(InpProfitObservationBars <= 0 || currentBarTime <= 0 || lastProfitTargetExitBarTime <= 0)
-      return(false);
-
-   const int exitBarShift = iBarShift(symbol, InpTF, lastProfitTargetExitBarTime, false);
-   if(exitBarShift < 0 || exitBarShift > InpProfitObservationBars)
-      return(false);
-
-   blockedBarsRemaining = InpProfitObservationBars - exitBarShift;
-   return(true);
+bool IsStopObservationLocked(const SymbolRuntimeState &state,
+                             const string symbol,
+                             const datetime currentBarTime,
+                             datetime &lastStopExitBarTime,
+                             int &blockedBarsRemaining)
+  {
+   return(IsObservationLocked(state.lastStopExitBarTime,
+                              symbol,
+                              currentBarTime,
+                              InpStopObservationBars,
+                              lastStopExitBarTime,
+                              blockedBarsRemaining));
   }
 
 string GetBackbonePointLabel(const int pointIndex)
@@ -466,6 +562,41 @@ void LogEntryBlockedByProfitObservation(const string symbol,
                FormatTime(lastProfitTargetExitBarTime),
                blockedBarsRemaining,
                InpProfitObservationBars);
+  }
+
+void LogEntryBlockedByStopObservation(const string symbol,
+                                      const datetime currentBarTime,
+                                      const datetime lastStopExitBarTime,
+                                      const int blockedBarsRemaining)
+  {
+   PrintFormat("Entry blocked by post-stop observation window. symbol=%s timeframe=%s current_bar=%s stop_exit_bar=%s bars_remaining=%d configured_bars=%d",
+               symbol,
+               EnumToString(InpTF),
+               FormatTime(currentBarTime),
+               FormatTime(lastStopExitBarTime),
+               blockedBarsRemaining,
+               InpStopObservationBars);
+  }
+
+void LogEntryBlockedByObservationWindows(const string symbol,
+                                         const datetime currentBarTime,
+                                         const datetime lastProfitTargetExitBarTime,
+                                         const int profitBlockedBarsRemaining,
+                                         const datetime lastStopExitBarTime,
+                                         const int stopBlockedBarsRemaining)
+  {
+   PrintFormat("Entry blocked by overlapping observation windows. symbol=%s timeframe=%s current_bar=%s "
+               "profit_exit_bar=%s profit_bars_remaining=%d profit_configured_bars=%d "
+               "stop_exit_bar=%s stop_bars_remaining=%d stop_configured_bars=%d",
+               symbol,
+               EnumToString(InpTF),
+               FormatTime(currentBarTime),
+               FormatTime(lastProfitTargetExitBarTime),
+               profitBlockedBarsRemaining,
+               InpProfitObservationBars,
+               FormatTime(lastStopExitBarTime),
+               stopBlockedBarsRemaining,
+               InpStopObservationBars);
   }
 
 void ResetBackboneSuccesses(SymbolRuntimeState &state)
@@ -632,6 +763,7 @@ void ResetSymbolState(SymbolRuntimeState &state, const string symbol)
    state.lastEvaluatedP4Price = 0.0;
    state.lastSuccessfulEntryBarTime = 0;
    state.lastProfitTargetExitBarTime = 0;
+   state.lastStopExitBarTime = 0;
    ResetBackboneSuccesses(state);
    ResetHistoryCache(state);
   }
@@ -1253,6 +1385,99 @@ double MinPositiveSpan(const PatternSnapshot &pattern)
    return(value == DBL_MAX ? 0.0 : value);
   }
 
+void ResetP5ActivationCandidate(P5ActivationCandidate &candidate)
+  {
+   candidate.valid = false;
+   candidate.p5Index = -1;
+   candidate.p6Index = -1;
+   candidate.p5Time = 0;
+   candidate.p6Time = 0;
+   candidate.p5Price = 0.0;
+   candidate.p6Price = 0.0;
+   candidate.p5Span = 0;
+   candidate.p6Span = 0;
+   candidate.d = 0.0;
+   candidate.e = 0.0;
+   candidate.t5 = 0.0;
+   candidate.t6 = 0.0;
+   candidate.softLossPrice = 0.0;
+   candidate.profitPrice = 0.0;
+  }
+
+bool FindLowestQualifiedP5ActivationCandidate(const ManagedPositionState &state,
+                                              MqlRates &rates[],
+                                              P5ActivationCandidate &candidate)
+  {
+   ResetP5ActivationCandidate(candidate);
+
+   const int total = ArraySize(rates);
+   int searchStartIndex = -1;
+   for(int i = 0; i < total; ++i)
+     {
+      if(rates[i].time > state.snapshot.pointTimes[4])
+        {
+         searchStartIndex = i;
+         break;
+        }
+     }
+
+   if(searchStartIndex < 0 || searchStartIndex >= total - 1)
+      return(false);
+
+   const double structureValue = state.snapshot.a + state.snapshot.b1 + state.snapshot.b2;
+   const double p4Price = state.snapshot.pointPrices[4];
+   for(int p5Index = searchStartIndex; p5Index < total - 1; ++p5Index)
+     {
+      const double p5Price = NormalizePrice(state.symbol, GetRoleLow(rates[p5Index]));
+      if(p5Price >= p4Price)
+         continue;
+
+      int bestP6Index = -1;
+      double bestP6Price = 0.0;
+      for(int p6Index = p5Index + 1; p6Index < total; ++p6Index)
+        {
+         const double currentP6Price = NormalizePrice(state.symbol, GetRoleHigh(rates[p6Index]));
+         if(bestP6Index < 0 || currentP6Price > bestP6Price)
+           {
+            bestP6Index = p6Index;
+            bestP6Price = currentP6Price;
+           }
+        }
+
+      if(bestP6Index < 0 || bestP6Price <= p5Price)
+         continue;
+
+      const double d = NormalizePrice(state.symbol, p4Price - p5Price);
+      const double e = NormalizePrice(state.symbol, bestP6Price - p5Price);
+      if(d <= 0.0 || e <= 0.0)
+         continue;
+
+      if(e < (InpP5P6ReboundMinRatioOfP3P5Drop * (state.snapshot.c + d)))
+         continue;
+
+      if(candidate.valid && p5Price >= candidate.p5Price)
+         continue;
+
+      candidate.valid = true;
+      candidate.p5Index = p5Index;
+      candidate.p6Index = bestP6Index;
+      candidate.p5Time = rates[p5Index].time;
+      candidate.p6Time = rates[bestP6Index].time;
+      candidate.p5Price = p5Price;
+      candidate.p6Price = bestP6Price;
+      candidate.p5Span = p5Index - searchStartIndex + 1;
+      candidate.p6Span = bestP6Index - p5Index;
+      candidate.d = d;
+      candidate.e = e;
+      candidate.t5 = MinutesBetween(state.snapshot.pointTimes[4], candidate.p5Time);
+      candidate.t6 = MinutesBetween(candidate.p5Time, candidate.p6Time);
+      candidate.softLossPrice = NormalizePrice(state.symbol, InpSoftLossC * p5Price);
+      candidate.profitPrice = NormalizePrice(state.symbol, p5Price + InpP5AnchoredProfitC * structureValue);
+     }
+
+   return(candidate.valid);
+  }
+
 int CountManagedPositions(const string symbol)
   {
    int count = 0;
@@ -1391,6 +1616,7 @@ void RegisterManagedPosition(const ulong ticket, const string symbol, const Patt
    g_positionStates[index].openedAt = TimeCurrent();
    g_positionStates[index].snapshot = pattern;
    g_positionStates[index].softStopActive = false;
+   g_positionStates[index].p5ActivationFrozen = false;
   }
 
 int FindManagedPositionState(const ulong ticket)
@@ -1473,91 +1699,51 @@ void ManageOpenPositions(const string symbol)
 
 void UpdateSoftStopState(ManagedPositionState &state)
   {
-   if(state.softStopActive)
+   if(state.p5ActivationFrozen)
       return;
 
    MqlRates rates[];
    if(!LoadClosedRates(state.symbol, rates))
       return;
 
-   const int total = ArraySize(rates);
-   int searchStartIndex = -1;
-   for(int i = 0; i < total; ++i)
-     {
-      if(rates[i].time > state.snapshot.pointTimes[4])
-        {
-         searchStartIndex = i;
-         break;
-        }
-     }
-
-   if(searchStartIndex < 0 || searchStartIndex >= total - 1)
+   P5ActivationCandidate candidate;
+   if(!FindLowestQualifiedP5ActivationCandidate(state, rates, candidate))
       return;
 
-   int p5Index = -1;
-   double p5Price = DBL_MAX;
-   for(int i = searchStartIndex; i < total; ++i)
-     {
-      const double value = GetRoleLow(rates[i]);
-      if(value < p5Price)
-        {
-         p5Price = value;
-         p5Index = i;
-        }
-     }
-
-   if(p5Index < 0 || p5Price >= state.snapshot.pointPrices[4])
-      return;
-
-   int p6Index = -1;
-   double p6Price = -DBL_MAX;
-   for(int i = p5Index + 1; i < total; ++i)
-     {
-      const double value = GetRoleHigh(rates[i]);
-      if(value > p6Price)
-        {
-         p6Price = value;
-         p6Index = i;
-        }
-     }
-
-   if(p6Index < 0 || p6Price <= p5Price)
-      return;
-
-   state.snapshot.pointIndexes[5] = p5Index;
-   state.snapshot.pointIndexes[6] = p6Index;
-   state.snapshot.pointTimes[5] = rates[p5Index].time;
-   state.snapshot.pointTimes[6] = rates[p6Index].time;
-   state.snapshot.pointPrices[5] = NormalizePrice(state.symbol, p5Price);
-   state.snapshot.pointPrices[6] = NormalizePrice(state.symbol, p6Price);
-   state.snapshot.pointSpans[4] = p5Index - searchStartIndex + 1;
-   state.snapshot.pointSpans[5] = p6Index - p5Index;
-
-   state.snapshot.d = NormalizePrice(state.symbol, state.snapshot.pointPrices[4] - state.snapshot.pointPrices[5]);
-   state.snapshot.e = NormalizePrice(state.symbol, state.snapshot.pointPrices[6] - state.snapshot.pointPrices[5]);
+   state.snapshot.pointIndexes[5] = candidate.p5Index;
+   state.snapshot.pointIndexes[6] = candidate.p6Index;
+   state.snapshot.pointTimes[5] = candidate.p5Time;
+   state.snapshot.pointTimes[6] = candidate.p6Time;
+   state.snapshot.pointPrices[5] = candidate.p5Price;
+   state.snapshot.pointPrices[6] = candidate.p6Price;
+   state.snapshot.pointSpans[4] = candidate.p5Span;
+   state.snapshot.pointSpans[5] = candidate.p6Span;
+   state.snapshot.d = candidate.d;
+   state.snapshot.e = candidate.e;
    state.snapshot.spanValues[4] = state.snapshot.c;
    state.snapshot.spanValues[5] = state.snapshot.d;
    state.snapshot.sspanmin = MinPositiveSpan(state.snapshot);
-   state.snapshot.t[4] = MinutesBetween(state.snapshot.pointTimes[4], state.snapshot.pointTimes[5]);
-   state.snapshot.t[5] = MinutesBetween(state.snapshot.pointTimes[5], state.snapshot.pointTimes[6]);
+   state.snapshot.t[4] = candidate.t5;
+   state.snapshot.t[5] = candidate.t6;
+   state.snapshot.softLossPrice = candidate.softLossPrice;
+   state.snapshot.profitPrice = candidate.profitPrice;
+   state.softStopActive = true;
+   state.p5ActivationFrozen = true;
 
-   if(state.snapshot.d <= 0.0 || state.snapshot.e <= 0.0)
-      return;
-
-   if(state.snapshot.e >= (InpP5P6ReboundMinRatioOfP3P5Drop * (state.snapshot.c + state.snapshot.d)))
-     {
-      state.snapshot.softLossPrice = NormalizePrice(state.symbol, InpSoftLossC * state.snapshot.pointPrices[5]);
-      state.softStopActive = true;
-      PrintFormat("Soft stop activated. symbol=%s ticket=%I64u soft_loss=%.5f p5=%.5f p6=%.5f d=%.5f e=%.5f c=%.5f",
-                  state.symbol,
-                  state.ticket,
-                  state.snapshot.softLossPrice,
-                  state.snapshot.pointPrices[5],
-                  state.snapshot.pointPrices[6],
-                  state.snapshot.d,
-                  state.snapshot.e,
-                  state.snapshot.c);
-     }
+   PrintFormat("Soft stop and P5-anchored profit activated. symbol=%s ticket=%I64u soft_loss=%.5f rewritten_profit=%.5f "
+               "selected_p5=(%s,%.5f) p6=(%s,%.5f) d=%.5f e=%.5f c=%.5f structure=%.5f",
+               state.symbol,
+               state.ticket,
+               state.snapshot.softLossPrice,
+               state.snapshot.profitPrice,
+               FormatTime(state.snapshot.pointTimes[5]),
+               state.snapshot.pointPrices[5],
+               FormatTime(state.snapshot.pointTimes[6]),
+               state.snapshot.pointPrices[6],
+               state.snapshot.d,
+               state.snapshot.e,
+               state.snapshot.c,
+               state.snapshot.a + state.snapshot.b1 + state.snapshot.b2);
   }
 
 void CloseManagedPosition(const int stateIndex, const string reason, const double triggerPrice)
@@ -1584,11 +1770,17 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
       return;
      }
 
-   if(reason == "profit_target")
+   if(reason == "profit_target" || reason == "hard_stop" || reason == "soft_stop")
      {
       const int symbolStateIndex = FindSymbolState(symbol);
       if(symbolStateIndex >= 0)
-         g_symbolStates[symbolStateIndex].lastProfitTargetExitBarTime = GetCurrentBarOpenTime(symbol);
+        {
+         const datetime currentBarTime = GetCurrentBarOpenTime(symbol);
+         if(reason == "profit_target")
+            g_symbolStates[symbolStateIndex].lastProfitTargetExitBarTime = currentBarTime;
+         else
+            g_symbolStates[symbolStateIndex].lastStopExitBarTime = currentBarTime;
+        }
      }
 
    LogExit(g_positionStates[stateIndex], reason, triggerPrice);

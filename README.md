@@ -1,6 +1,6 @@
 # MT5TradeAlgo
 
-本仓库当前的主策略是 `mt5/P4PatternStrategy.mq5`。它会在 MT5 中按定时器轮询多个品种，基于 P4 形态寻找做多机会，并自动管理止盈、强止损和条件触发的弱止损。
+本仓库当前的主策略是 `mt5/P4PatternStrategy.mq5`。它会在 MT5 中按定时器轮询多个品种，基于 P4 形态寻找做多机会，并自动管理止盈、强止损、条件触发的弱止损，以及止盈/止损后的观察窗口。
 
 这份说明以当前代码实现为准，结合 `prd/Mt5交易策略_P4Entry.md` 的模式图和已归档的 OpenSpec 变更整理而成，适合第一次接触这份策略代码的人快速理解“它现在到底怎么工作”。
 
@@ -109,11 +109,12 @@
 
 - 同一品种刚刚在当前 `P4` 所在 bar 成功开过仓
 - 该品种刚刚止盈，仍处于 `InpProfitObservationBars` 定义的观察窗口内
+- 该品种刚刚强止损或弱止损，仍处于 `InpStopObservationBars` 定义的观察窗口内
 - 当前候选与“已经成功开过仓的历史骨架”共享同角色的 `P0/P1/P2/P3` 任一点
 - 当前由本 EA 管理的该品种持仓数已经达到 `InpMaxPositionsPerSymbol`
 - 当前 `ask` 已经低于强止损价，或者已经高于止盈价，说明信号已过时
 
-通过全部门控后，策略才会发出市价买单。
+只要止盈观察窗口或止损观察窗口任意一个仍未结束，就不会开新单。通过全部门控后，策略才会发出市价买单。
 
 ## 开仓、止盈和止损
 
@@ -133,19 +134,19 @@
 
 持仓后只要实时 `bid <= hardLossPrice`，策略就会平仓。
 
-### 止盈
+### 初始止盈
 
-当前代码中的止盈价格为：
+开仓后的初始止盈价格为：
 
 - `profitPrice = P4 + InpProfitC * (a + b1 + b2)`
 
 默认 `InpProfitC = 0.6`。
 
-这也和最初 PRD 中的 `买入价 + profitC * a` 不同，当前实现使用的是整个前序结构 `a + b1 + b2`。
+这和最初 PRD 中的 `买入价 + profitC * a` 不同，当前实现使用的是整个前序结构 `a + b1 + b2`。
 
 ### 弱止损
 
-弱止损不是开仓就有，而是开仓后继续从 `P4` 之后的已收盘 K 线中寻找：
+弱止损不是开仓就有，而是开仓后继续从 `P4` 之后的已收盘 K 线中寻找合格的 `P5/P6` 组合：
 
 - `P5`：后续最低点
 - `P6`：`P5` 之后的后续最高点
@@ -155,15 +156,29 @@
 - `d = P4 - P5`
 - `e = P6 - P5`
 
-只有满足下面条件，弱止损才会被激活：
+只有满足下面条件，弱止损和二次止盈改写才会首次激活：
 
 - `e >= InpP5P6ReboundMinRatioOfP3P5Drop * (c + d)`
 
-激活后：
+如果当前时刻存在多个满足条件的 `P5` 候选，代码会选择其中价格最低的那个 `P5` 作为 `selectedP5`，并一次性设置：
 
-- `softLossPrice = InpSoftLossC * P5`
+- `softLossPrice = InpSoftLossC * selectedP5`
+- `profitPrice = selectedP5 + InpP5AnchoredProfitC * (a + b1 + b2)`
 
-如果实时 `bid <= softLossPrice`，则按 `soft_stop` 平仓。
+默认 `InpP5AnchoredProfitC = 0.7`。
+
+一旦首次激活完成，这两个价位会被冻结，后续即使再出现新的 `P5/P6` 组合，也不会继续改写。
+
+如果实时 `bid <= softLossPrice`，则按 `soft_stop` 平仓；如果实时 `bid >=` 当前生效的 `profitPrice`，则按 `profit_target` 平仓。
+
+### 观察窗口
+
+当前实现有两套互相独立的观察窗口，且都只影响新开仓，不影响已有持仓继续止盈止损：
+
+- 止盈观察窗口：持仓因 `profit_target` 平仓后启动，长度由 `InpProfitObservationBars` 控制
+- 止损观察窗口：持仓因 `hard_stop` 或 `soft_stop` 平仓后启动，长度由 `InpStopObservationBars` 控制
+
+如果同一品种同时存在止盈观察窗口和止损观察窗口，则只要任意一个窗口尚未结束，就不能再开新单。
 
 ## 参数说明
 
@@ -180,6 +195,7 @@
 | `InpMaxPositionsPerSymbol` | `1` | 单品种最大并行持仓数 | 超限时阻止开仓 |
 | `InpSlippagePoints` | `20` | 允许的价格偏差点数 | 用于交易请求的成交偏差控制 |
 | `InpProfitObservationBars` | `30` | 止盈后观察窗口 bar 数 | 观察期内阻止新开仓 |
+| `InpStopObservationBars` | `30` | 止损后观察窗口 bar 数 | `hard_stop` 或 `soft_stop` 后观察期内阻止新开仓 |
 | `InpLookbackBars` | `300` | 回看已收盘 K 线数量 | 限制历史骨架搜索范围 |
 | `InpAdjustPointMaxSpanKNumber` | `10` | 相邻点允许的最大 K 线跨度 | 限制 `P0-P3` 各段跨度 |
 
@@ -204,8 +220,9 @@
 | `InpP3P4DropMinRatioOfStructure` | `0.4` | `CondB` 阈值 | 要求 `c / (a+b1+b2) >= 该值` |
 | `InpCondCZ` | `1.0` | `CondC` 系数 | 要求 `t4 < 该值 * (t1+t2+t3)` |
 | `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.65` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
-| `InpSoftLossC` | `1.0` | 弱止损价系数 | `softLossPrice = 该值 * P5` |
+| `InpSoftLossC` | `1.0` | 弱止损价系数 | `softLossPrice = 该值 * selectedP5` |
 | `InpProfitC` | `0.6` | 止盈系数 | `profitPrice = P4 + 该值 * (a+b1+b2)` |
+| `InpP5AnchoredProfitC` | `0.7` | `P5` 锚定止盈系数 | 首次 `P5/P6` 激活后，`profitPrice = selectedP5 + 该值 * (a+b1+b2)` |
 | `InpEnableExactSearchCompare` | `false` | 调试开关 | 打开后会对比缓存搜索和精确搜索结果，仅用于诊断 |
 
 ## 当前实现与最初 PRD 的主要差异
@@ -218,8 +235,10 @@
 - 独立的旧 `CondD` 不再参与过滤；代码里 `condD` 仅保留为结构字段，当前恒为 `true`
 - 旧的 `tspanmin` 门槛不再作为入场条件，当前改为 `a` 的最小空间、`P1-P2` 最小时长、`b1+b2` 区间和 `Pre0` 前置下跌先决条件
 - 强止损改为 `P0`
-- 止盈改为基于 `a+b1+b2`
+- 初始止盈改为基于 `a+b1+b2`
+- 首次 `P5/P6` 激活后，止盈会改写为基于最低合格 `P5` 的二次止盈
 - 弱止损激活条件改为 `e >= 阈值 * (c+d)`
+- 止盈后和止损后都有独立观察窗口，且任一窗口有效时都禁止新开仓
 
 如果你要调参，建议先按“当前代码公式”理解，不要直接沿用最初 PRD 里的旧公式。
 
@@ -229,7 +248,7 @@
 
 - 开仓日志 `ENTRY`：会输出 `P0-P4` 时间和价格、`a/b1/b2/c`、`t1-t4`、`Pre0` 信息、止盈止损价和结构过滤阈值
 - 平仓日志 `EXIT`：会输出 `P4/P5/P6` 时间和价格、`d/e`、`t5/t6` 以及平仓原因
-- 阻止日志：会明确区分是被 `P4` 同 bar 锁、止盈观察窗口、共享骨架成功锁，还是持仓上限拦截
+- 阻止日志：会明确区分是被 `P4` 同 bar 锁、止盈观察窗口、止损观察窗口、双观察窗口重叠、共享骨架成功锁，还是持仓上限拦截
 
 这些日志基本已经覆盖了“为什么开仓”“为什么不开仓”“为什么平仓”三类问题。
 
@@ -241,7 +260,7 @@
 2. 把 EA 挂到任意一个图表上即可，实际扫描对象由 `InpSymbols` 决定，不依赖挂载图表本身的品种。
 3. 设置 `InpSymbols`、`InpTF`、`InpFixedLots` 等运行参数，确认目标品种已在 Market Watch 中可用。
 4. 打开 Experts / Journal，先确认初始化日志，再观察 `ENTRY`、`EXIT` 和各种阻止日志是否符合预期。
-5. 实盘前先用 Strategy Tester 回测，重点检查止盈观察窗口、共享骨架锁和弱止损激活是否符合预期。
+5. 实盘前先用 Strategy Tester 回测，重点检查止盈/止损观察窗口、共享骨架锁、首次 `P5/P6` 激活后最低 `P5` 的选择，以及二次止盈改写是否符合预期。
 
 ## 使用建议
 
@@ -249,6 +268,6 @@
 
 1. 先对照上面的模式图，看懂 `P0-P6` 在当前代码中的取价方式。
 2. 再重点理解四组门槛：`CondA`、`a/P1P2/bSum` 结构门槛、`Pre0` 前置下跌、`P4` 实时触发。
-3. 最后再调交易参数，特别是 `InpProfitObservationBars`、`InpMaxPositionsPerSymbol` 和 `InpP5P6ReboundMinRatioOfP3P5Drop`。
+3. 最后再调交易参数，特别是 `InpProfitObservationBars`、`InpStopObservationBars`、`InpP5P6ReboundMinRatioOfP3P5Drop`、`InpP5AnchoredProfitC` 和 `InpMaxPositionsPerSymbol`。
 
 如果需要回测，可直接使用 `mt5/P4PatternStrategy.mq5`，并通过 MT5 Strategy Tester 观察 `ENTRY` / `EXIT` 日志是否符合预期。
