@@ -1,14 +1,4 @@
-# mt5-kline-pattern-detection Specification
-
-## Purpose
-TBD - created by archiving change add-mt5-kline-pattern-strategy. Update Purpose after archive.
-## Requirements
-### Requirement: 从 MT5 K 线数据中识别 PRD 定义的 P0-P6 多头模式
-策略 SHALL 针对每个已配置的交易品种和周期分析已收盘的 bar，并识别满足 PRD 空间结构和时间结构的 P0 到 P6 候选点位。检测器 SHALL 为每个候选序列计算 `a`、`b1`、`b2`、`c`、`d`、`e`、`r1`、`r2`、`sspanmin`、`t1` 到 `t6`、`trigger_pattern_total_time_minute` 和 `tspanmin`。
-
-#### Scenario: 候选序列生成标准化模式快照
-- **WHEN** 某个交易品种拥有足够的已收盘 bar 来构成一组候选 P0-P6 序列
-- **THEN** 检测器会产出一份包含点位时间、点位价格、空间变量和时间变量的模式快照
+## MODIFIED Requirements
 
 ### Requirement: 强制执行可配置的点位取值与单段跨度规则
 策略 SHALL 支持 `InpAdjustPointMinSpanKNumber` 和 `InpAdjustPointMaxSpanKNumber` 共同限制相邻点之间的单段跨度，其中 `SpanKNumber` SHALL 定义为“起点与终点之间中间间隔的 K 线数量”，即不包含起点和终点所在 K 线。该最小/最大跨度区间 SHALL 同时作用于 `P0->P1`、`P1->P2`、`P2->P3` 和 `P3->P4` 四段。与此同时，策略 SHALL 使用角色化点位规则来确定 `P0-P6` 的价格来源，而 SHALL NOT 再暴露 `PointValueTypeEnum` 作为统一点位取值模式。任何小于最小跨度或超过最大跨度的候选序列 SHALL 被拒绝。

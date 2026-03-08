@@ -20,7 +20,8 @@ input int InpSlippagePoints = 20;
 input int InpProfitObservationBars = 30;
 input int InpStopObservationBars = 30;
 input int InpLookbackBars = 300;
-input int InpAdjustPointMaxSpanKNumber = 10;
+input int InpAdjustPointMinSpanKNumber = 5;
+input int InpAdjustPointMaxSpanKNumber = 30;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
@@ -36,7 +37,6 @@ input int InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 = 0;
 
 input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.65;
 input double InpSoftLossC = 1.0;
-input double InpProfitC = 0.6;
 input double InpP5AnchoredProfitC = 0.7;
 input bool InpEnableExactSearchCompare = false;
 
@@ -73,6 +73,7 @@ struct PatternSnapshot
    bool              condC;
    bool              condD;
    bool              condF;
+   bool              profitTargetActive;
    double            referenceEntryPrice;
    double            hardLossPrice;
    double            softLossPrice;
@@ -189,9 +190,15 @@ bool ValidateInputs()
       return(false);
      }
 
-   if(InpAdjustPointMaxSpanKNumber < 1 || InpLookbackBars < 16)
+   if(InpAdjustPointMinSpanKNumber < 0 || InpAdjustPointMaxSpanKNumber < 0 || InpAdjustPointMinSpanKNumber > InpAdjustPointMaxSpanKNumber)
      {
-      Print("Lookback or point span settings are too small.");
+      Print("Invalid min/max point span settings.");
+      return(false);
+     }
+
+   if(InpLookbackBars < ((InpAdjustPointMaxSpanKNumber + 1) * 4))
+     {
+      Print("Lookback bars are too small for the configured max point span.");
       return(false);
      }
 
@@ -377,57 +384,24 @@ void ProcessSymbol(const string symbol)
                                                               lastStopExitBarTime,
                                                               stopBlockedBarsRemaining);
    if(profitObservationLocked && stopObservationLocked)
-     {
-      LogEntryBlockedByObservationWindows(symbol,
-                                          currentBarTime,
-                                          lastProfitTargetExitBarTime,
-                                          profitBlockedBarsRemaining,
-                                          lastStopExitBarTime,
-                                          stopBlockedBarsRemaining);
       return;
-     }
 
    if(profitObservationLocked)
-     {
-      LogEntryBlockedByProfitObservation(symbol,
-                                         currentBarTime,
-                                         lastProfitTargetExitBarTime,
-                                         profitBlockedBarsRemaining);
       return;
-     }
 
    if(stopObservationLocked)
-     {
-      LogEntryBlockedByStopObservation(symbol,
-                                       currentBarTime,
-                                       lastStopExitBarTime,
-                                       stopBlockedBarsRemaining);
       return;
-     }
 
    if(IsP4BarLocked(g_symbolStates[stateIndex], currentBarTime))
-     {
-      LogEntryBlockedByP4Bar(symbol, currentBarTime);
       return;
-     }
 
    datetime successfulBackboneP4BarTime = 0;
    string matchedBackbonePoint = "";
    if(IsBackboneSuccessLocked(g_symbolStates[stateIndex], match, successfulBackboneP4BarTime, matchedBackbonePoint))
-     {
-      LogEntryBlockedByBackboneSuccess(match, successfulBackboneP4BarTime, matchedBackbonePoint);
       return;
-     }
 
    if(CountManagedPositions(symbol) >= InpMaxPositionsPerSymbol)
-     {
-      PrintFormat("Entry blocked by position limit. symbol=%s timeframe=%s p4_bar=%s limit=%d",
-                  symbol,
-                  EnumToString(InpTF),
-                  FormatTime(currentBarTime),
-                  InpMaxPositionsPerSymbol);
       return;
-     }
 
    ExecuteEntry(g_symbolStates[stateIndex], match);
   }
@@ -711,6 +685,249 @@ void LogEntryBlockedByBackboneSuccess(const PatternSnapshot &pattern,
                FormatTime(pattern.pointTimes[3]));
   }
 
+long FindOpenChart(const string symbol, const ENUM_TIMEFRAMES timeframe)
+  {
+   for(long chartId = ChartFirst(); chartId >= 0; chartId = ChartNext(chartId))
+     {
+      if(ChartSymbol(chartId) == symbol && (ENUM_TIMEFRAMES)ChartPeriod(chartId) == timeframe)
+         return(chartId);
+     }
+   return(-1);
+  }
+
+string BuildEntryAnnotationPrefix(const PatternSnapshot &pattern, const ulong ticket)
+  {
+   return(StringFormat("P4Pattern_%s_%s_%I64u_%I64d",
+                       pattern.symbol,
+                       EnumToString(InpTF),
+                       ticket,
+                       (long)pattern.p4BarTime));
+  }
+
+color GetAnnotationPointColor(const string pointLabel)
+  {
+   if(pointLabel == "Pre0")
+      return(clrRed);
+   if(pointLabel == "P0")
+      return(clrYellow);
+   if(pointLabel == "P1")
+      return(clrOrangeRed);
+   if(pointLabel == "P2")
+      return(clrHotPink);
+   if(pointLabel == "P3")
+      return(clrMagenta);
+   if(pointLabel == "P4")
+      return(clrGold);
+   if(pointLabel == "P5")
+      return(clrWhite);
+   if(pointLabel == "P6")
+      return(clrKhaki);
+   return(clrWhiteSmoke);
+  }
+
+datetime MidTime(const datetime lhs, const datetime rhs)
+  {
+   if(lhs <= 0)
+      return(rhs);
+   if(rhs <= 0)
+      return(lhs);
+   return((datetime)(((long)lhs + (long)rhs) / 2));
+  }
+
+double MidPrice(const double lhs, const double rhs)
+  {
+   return((lhs + rhs) / 2.0);
+  }
+
+string FormatPriceValue(const string symbol, const double value)
+  {
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   if(digits < 0)
+      digits = 5;
+   return(DoubleToString(value, digits));
+  }
+
+string FormatValueLabel(const string symbol, const string label, const double value)
+  {
+   return(label + "=" + FormatPriceValue(symbol, value));
+  }
+
+void ConfigureAnnotationObject(const long chartId, const string objectName)
+  {
+   ObjectSetInteger(chartId, objectName, OBJPROP_BACK, false);
+   ObjectSetInteger(chartId, objectName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(chartId, objectName, OBJPROP_SELECTED, false);
+   ObjectSetInteger(chartId, objectName, OBJPROP_HIDDEN, false);
+  }
+
+bool CreateAnnotationLine(const long chartId,
+                          const string objectName,
+                          const datetime fromTime,
+                          const double fromPrice,
+                          const datetime toTime,
+                          const double toPrice,
+                          const color lineColor)
+  {
+   if(ObjectFind(chartId, objectName) >= 0)
+      ObjectDelete(chartId, objectName);
+
+   if(!ObjectCreate(chartId, objectName, OBJ_TREND, 0, fromTime, fromPrice, toTime, toPrice))
+      return(false);
+
+   ConfigureAnnotationObject(chartId, objectName);
+   ObjectSetInteger(chartId, objectName, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(chartId, objectName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(chartId, objectName, OBJPROP_RAY_RIGHT, false);
+   return(true);
+  }
+
+bool CreateAnnotationPoint(const long chartId,
+                           const string objectPrefix,
+                           const string pointLabel,
+                           const datetime pointTime,
+                           const double pointPrice,
+                           const color pointColor)
+  {
+   const string markerName = objectPrefix + "_" + pointLabel + "_MARK";
+   const string textName = objectPrefix + "_" + pointLabel + "_TEXT";
+
+   if(ObjectFind(chartId, markerName) >= 0)
+      ObjectDelete(chartId, markerName);
+   if(!ObjectCreate(chartId, markerName, OBJ_ARROW, 0, pointTime, pointPrice))
+      return(false);
+   ConfigureAnnotationObject(chartId, markerName);
+   ObjectSetInteger(chartId, markerName, OBJPROP_COLOR, pointColor);
+   ObjectSetInteger(chartId, markerName, OBJPROP_ARROWCODE, 159);
+   ObjectSetInteger(chartId, markerName, OBJPROP_WIDTH, 1);
+
+   if(ObjectFind(chartId, textName) >= 0)
+      ObjectDelete(chartId, textName);
+   if(!ObjectCreate(chartId, textName, OBJ_TEXT, 0, pointTime, pointPrice))
+      return(false);
+   ConfigureAnnotationObject(chartId, textName);
+   ObjectSetInteger(chartId, textName, OBJPROP_COLOR, pointColor);
+   ObjectSetString(chartId, textName, OBJPROP_TEXT, pointLabel);
+   ObjectSetInteger(chartId, textName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(chartId, textName, OBJPROP_FONTSIZE, 10);
+   return(true);
+  }
+
+bool CreateAnnotationValueLabel(const long chartId,
+                                const string objectName,
+                                const datetime pointTime,
+                                const double pointPrice,
+                                const string labelText,
+                                const color labelColor)
+  {
+   if(ObjectFind(chartId, objectName) >= 0)
+      ObjectDelete(chartId, objectName);
+
+   if(!ObjectCreate(chartId, objectName, OBJ_TEXT, 0, pointTime, pointPrice))
+      return(false);
+
+   ConfigureAnnotationObject(chartId, objectName);
+   ObjectSetInteger(chartId, objectName, OBJPROP_COLOR, labelColor);
+   ObjectSetString(chartId, objectName, OBJPROP_TEXT, labelText);
+   ObjectSetInteger(chartId, objectName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   ObjectSetInteger(chartId, objectName, OBJPROP_FONTSIZE, 10);
+   return(true);
+  }
+
+bool CreateAnnotationLevel(const long chartId,
+                           const string objectPrefix,
+                           const string symbol,
+                           const string levelLabel,
+                           const datetime anchorTime,
+                           const double levelPrice,
+                           const color levelColor)
+  {
+   const string lineName = objectPrefix + "_" + levelLabel + "_LINE";
+   const string textName = objectPrefix + "_" + levelLabel + "_TEXT";
+   if(ObjectFind(chartId, lineName) >= 0)
+      ObjectDelete(chartId, lineName);
+   if(!ObjectCreate(chartId, lineName, OBJ_HLINE, 0, 0, levelPrice))
+      return(false);
+
+   ConfigureAnnotationObject(chartId, lineName);
+   ObjectSetInteger(chartId, lineName, OBJPROP_COLOR, levelColor);
+   ObjectSetInteger(chartId, lineName, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(chartId, lineName, OBJPROP_WIDTH, 1);
+
+   return(CreateAnnotationValueLabel(chartId,
+                                     textName,
+                                     anchorTime,
+                                     levelPrice,
+                                     levelLabel + "=" + FormatPriceValue(symbol, levelPrice),
+                                     levelColor));
+  }
+
+bool CreateP4BuyHighlight(const long chartId,
+                          const string objectName,
+                          const datetime pointTime,
+                          const double pointPrice)
+  {
+   if(ObjectFind(chartId, objectName) >= 0)
+      ObjectDelete(chartId, objectName);
+   if(!ObjectCreate(chartId, objectName, OBJ_ARROW_BUY, 0, pointTime, pointPrice))
+      return(false);
+
+   ConfigureAnnotationObject(chartId, objectName);
+   ObjectSetInteger(chartId, objectName, OBJPROP_COLOR, clrGold);
+   ObjectSetInteger(chartId, objectName, OBJPROP_WIDTH, 2);
+   return(true);
+  }
+
+bool DrawEntryPatternAnnotation(const PatternSnapshot &pattern,
+                                const ulong ticket,
+                                string &annotationStatus)
+  {
+   annotationStatus = "no_matching_chart";
+   const long chartId = FindOpenChart(pattern.symbol, InpTF);
+   if(chartId < 0)
+      return(false);
+
+   const string prefix = BuildEntryAnnotationPrefix(pattern, ticket);
+   const color lineColor = clrSilver;
+   const bool hasPre0 = pattern.preCondPriorDecline && pattern.pre0Time > 0;
+   const bool hasP5 = pattern.pointTimes[5] > 0;
+   const bool hasP6 = pattern.pointTimes[6] > 0;
+
+   if((hasPre0 &&
+       (!CreateAnnotationPoint(chartId, prefix, "Pre0", pattern.pre0Time, pattern.pre0Price, GetAnnotationPointColor("Pre0")) ||
+        !CreateAnnotationLine(chartId, prefix + "_LPre0P0", pattern.pre0Time, pattern.pre0Price, pattern.pointTimes[0], pattern.pointPrices[0], lineColor))) ||
+      !CreateAnnotationPoint(chartId, prefix, "P0", pattern.pointTimes[0], pattern.pointPrices[0], GetAnnotationPointColor("P0")) ||
+      !CreateAnnotationPoint(chartId, prefix, "P1", pattern.pointTimes[1], pattern.pointPrices[1], GetAnnotationPointColor("P1")) ||
+      !CreateAnnotationPoint(chartId, prefix, "P2", pattern.pointTimes[2], pattern.pointPrices[2], GetAnnotationPointColor("P2")) ||
+      !CreateAnnotationPoint(chartId, prefix, "P3", pattern.pointTimes[3], pattern.pointPrices[3], GetAnnotationPointColor("P3")) ||
+      !CreateAnnotationPoint(chartId, prefix, "P4", pattern.pointTimes[4], pattern.pointPrices[4], GetAnnotationPointColor("P4")) ||
+      (hasP5 && !CreateAnnotationPoint(chartId, prefix, "P5", pattern.pointTimes[5], pattern.pointPrices[5], GetAnnotationPointColor("P5"))) ||
+      (hasP6 && !CreateAnnotationPoint(chartId, prefix, "P6", pattern.pointTimes[6], pattern.pointPrices[6], GetAnnotationPointColor("P6"))) ||
+      !CreateAnnotationLine(chartId, prefix + "_L01", pattern.pointTimes[0], pattern.pointPrices[0], pattern.pointTimes[1], pattern.pointPrices[1], lineColor) ||
+      !CreateAnnotationLine(chartId, prefix + "_L12", pattern.pointTimes[1], pattern.pointPrices[1], pattern.pointTimes[2], pattern.pointPrices[2], lineColor) ||
+      !CreateAnnotationLine(chartId, prefix + "_L23", pattern.pointTimes[2], pattern.pointPrices[2], pattern.pointTimes[3], pattern.pointPrices[3], lineColor) ||
+      !CreateAnnotationLine(chartId, prefix + "_L34", pattern.pointTimes[3], pattern.pointPrices[3], pattern.pointTimes[4], pattern.pointPrices[4], lineColor) ||
+      (hasP5 && !CreateAnnotationLine(chartId, prefix + "_L45", pattern.pointTimes[4], pattern.pointPrices[4], pattern.pointTimes[5], pattern.pointPrices[5], lineColor)) ||
+      (hasP6 && !CreateAnnotationLine(chartId, prefix + "_L56", pattern.pointTimes[5], pattern.pointPrices[5], pattern.pointTimes[6], pattern.pointPrices[6], lineColor)) ||
+      !CreateP4BuyHighlight(chartId, prefix + "_BUY", pattern.pointTimes[4], pattern.pointPrices[4]) ||
+      !CreateAnnotationLevel(chartId, prefix, pattern.symbol, "hard_stop", pattern.pointTimes[4], pattern.hardLossPrice, clrRed) ||
+      (pattern.softLossPrice > 0.0 &&
+       !CreateAnnotationLevel(chartId, prefix, pattern.symbol, "soft_stop", hasP6 ? pattern.pointTimes[6] : pattern.pointTimes[4], pattern.softLossPrice, clrOrange)) ||
+      (hasPre0 &&
+       !CreateAnnotationValueLabel(chartId, prefix + "_V_PRE0_DROP", MidTime(pattern.pre0Time, pattern.pointTimes[0]), MidPrice(pattern.pre0Price, pattern.pointPrices[0]), FormatValueLabel(pattern.symbol, "pre0_drop", pattern.pre0Drop), GetAnnotationPointColor("Pre0"))) ||
+      !CreateAnnotationValueLabel(chartId, prefix + "_V_B1", MidTime(pattern.pointTimes[0], pattern.pointTimes[2]), MidPrice(pattern.pointPrices[0], pattern.pointPrices[2]), FormatValueLabel(pattern.symbol, "b1", pattern.b1), GetAnnotationPointColor("P0")) ||
+      !CreateAnnotationValueLabel(chartId, prefix + "_V_A", MidTime(pattern.pointTimes[1], pattern.pointTimes[2]), MidPrice(pattern.pointPrices[1], pattern.pointPrices[2]), FormatValueLabel(pattern.symbol, "a", pattern.a), GetAnnotationPointColor("P1")) ||
+      !CreateAnnotationValueLabel(chartId, prefix + "_V_B2", MidTime(pattern.pointTimes[1], pattern.pointTimes[3]), MidPrice(pattern.pointPrices[1], pattern.pointPrices[3]), FormatValueLabel(pattern.symbol, "b2", pattern.b2), GetAnnotationPointColor("P3")) ||
+      !CreateAnnotationValueLabel(chartId, prefix + "_V_C", MidTime(pattern.pointTimes[3], pattern.pointTimes[4]), MidPrice(pattern.pointPrices[3], pattern.pointPrices[4]), FormatValueLabel(pattern.symbol, "c", pattern.c), GetAnnotationPointColor("P4")))
+     {
+      annotationStatus = "draw_failed";
+      return(false);
+     }
+
+   ChartRedraw(chartId);
+   annotationStatus = "drawn";
+   return(true);
+  }
+
 double GetRoleLow(const MqlRates &rate)
   {
    return(rate.low);
@@ -782,7 +999,7 @@ bool LoadClosedRates(const string symbol, MqlRates &rates[])
 
    ArrayResize(rates, copied);
    ArraySetAsSeries(rates, false);
-  return(copied >= (InpAdjustPointMaxSpanKNumber * 4 + 1));
+   return(copied >= ((InpAdjustPointMaxSpanKNumber + 1) * 4));
   }
 
 bool HasNewProcessableTick(SymbolRuntimeState &state, const MqlTick &tick)
@@ -922,10 +1139,10 @@ bool BuildHistoricalBackbone(const string symbol,
    pattern.pointPrices[2] = NormalizePrice(symbol, p2);
    pattern.pointPrices[3] = NormalizePrice(symbol, p3);
 
-   pattern.pointSpans[0] = i1 - i0;
-   pattern.pointSpans[1] = i2 - i1;
-   pattern.pointSpans[2] = i3 - i2;
-   pattern.pointSpans[3] = (latestClosedIndex - i3) + 1;
+   pattern.pointSpans[0] = MiddleBarCountBetweenIndexes(i0, i1);
+   pattern.pointSpans[1] = MiddleBarCountBetweenIndexes(i1, i2);
+   pattern.pointSpans[2] = MiddleBarCountBetweenIndexes(i2, i3);
+   pattern.pointSpans[3] = MiddleBarCountBetweenIndexes(i3, latestClosedIndex + 1);
 
    pattern.a = NormalizePrice(symbol, a);
    pattern.b1 = NormalizePrice(symbol, b1);
@@ -942,7 +1159,7 @@ bool BuildHistoricalBackbone(const string symbol,
    pattern.t[2] = MinutesBetween(pattern.pointTimes[2], pattern.pointTimes[3]);
    pattern.triggerPatternTotalTimeMinute = pattern.t[0] + pattern.t[1] + pattern.t[2];
 
-   const int p1p2BarCount = pattern.pointSpans[1] + 1;
+   const int p1p2BarCount = SpanToInclusiveBarCount(pattern.pointSpans[1]);
    const double bSumValue = pattern.b1 + pattern.b2;
    const double bSumMinValue = InpBSumValueMinRatioOfAValue * pattern.a;
    const double bSumMaxValue = InpBSumValueMaxRatioOfAValue * pattern.a;
@@ -983,16 +1200,16 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
    if(latest < 3)
       return;
 
-   const int span = InpAdjustPointMaxSpanKNumber;
+   const int maxIndexDistance = MaxPointIndexDistance();
    int p0Candidates[];
    int p1Candidates[];
    int p2Candidates[];
    int p3Candidates[];
 
-   CollectCandidateIndexes(latest - (span * 4) + 1, latest - 3, p0Candidates);
-   CollectCandidateIndexes(latest - (span * 3) + 1, latest - 2, p1Candidates);
-   CollectCandidateIndexes(latest - (span * 2) + 1, latest - 1, p2Candidates);
-   CollectCandidateIndexes(latest - span + 1, latest, p3Candidates);
+   CollectCandidateIndexes(latest - (maxIndexDistance * 4) + 1, latest - 3, p0Candidates);
+   CollectCandidateIndexes(latest - (maxIndexDistance * 3) + 1, latest - 2, p1Candidates);
+   CollectCandidateIndexes(latest - (maxIndexDistance * 2) + 1, latest - 1, p2Candidates);
+   CollectCandidateIndexes(latest - maxIndexDistance + 1, latest, p3Candidates);
 
    for(int p3Cursor = 0; p3Cursor < ArraySize(p3Candidates); ++p3Cursor)
      {
@@ -1002,7 +1219,7 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
       for(int p2Cursor = 0; p2Cursor < ArraySize(p2Candidates); ++p2Cursor)
         {
          const int i2 = p2Candidates[p2Cursor];
-         if(i2 >= i3 || (i3 - i2) > span)
+         if(!IsPointSpanWithinConfiguredRange(i2, i3))
             continue;
 
          const double p2 = GetRoleLow(rates[i2]);
@@ -1012,7 +1229,7 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
          for(int p1Cursor = 0; p1Cursor < ArraySize(p1Candidates); ++p1Cursor)
            {
             const int i1 = p1Candidates[p1Cursor];
-            if(i1 >= i2 || (i2 - i1) > span)
+            if(!IsPointSpanWithinConfiguredRange(i1, i2))
                continue;
 
             const double p1 = GetRoleHigh(rates[i1]);
@@ -1029,7 +1246,7 @@ void BuildHistoricalCandidateCache(SymbolRuntimeState &state, MqlRates &rates[])
             for(int p0Cursor = 0; p0Cursor < ArraySize(p0Candidates); ++p0Cursor)
               {
                const int i0 = p0Candidates[p0Cursor];
-               if(i0 >= i1 || (i1 - i0) > span)
+               if(!IsPointSpanWithinConfiguredRange(i0, i1))
                   continue;
 
                const double p0 = GetRoleLow(rates[i0]);
@@ -1115,8 +1332,8 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
    pattern.referenceEntryPrice = pattern.pointPrices[4];
    pattern.hardLossPrice = pattern.pointPrices[0];
    pattern.softLossPrice = 0.0;
-   pattern.profitPrice = NormalizePrice(pattern.symbol,
-                                        pattern.referenceEntryPrice + InpProfitC * (pattern.b1 + pattern.b2 + pattern.a));
+   pattern.profitTargetActive = false;
+   pattern.profitPrice = 0.0;
    return(true);
   }
 
@@ -1174,15 +1391,24 @@ bool FindLatestPatternLegacyExact(const string symbol,
    PatternSnapshot best;
    ResetPattern(best);
 
-   const int span = InpAdjustPointMaxSpanKNumber;
-   for(int i3 = latest; i3 >= MathMax(0, latest - span + 1); --i3)
+   const int maxIndexDistance = MaxPointIndexDistance();
+   for(int i3 = latest; i3 >= MathMax(0, latest - maxIndexDistance + 1); --i3)
      {
-      for(int i2 = i3 - 1; i2 >= MathMax(0, i3 - span); --i2)
+      for(int i2 = i3 - 1; i2 >= MathMax(0, i3 - maxIndexDistance); --i2)
         {
-         for(int i1 = i2 - 1; i1 >= MathMax(0, i2 - span); --i1)
+         if(!IsPointSpanWithinConfiguredRange(i2, i3))
+            continue;
+
+         for(int i1 = i2 - 1; i1 >= MathMax(0, i2 - maxIndexDistance); --i1)
            {
-            for(int i0 = i1 - 1; i0 >= MathMax(0, i1 - span); --i0)
+            if(!IsPointSpanWithinConfiguredRange(i1, i2))
+               continue;
+
+            for(int i0 = i1 - 1; i0 >= MathMax(0, i1 - maxIndexDistance); --i0)
               {
+               if(!IsPointSpanWithinConfiguredRange(i0, i1))
+                  continue;
+
                PatternSnapshot backbone;
                if(!BuildHistoricalBackbone(symbol, rates, i0, i1, i2, i3, latest, backbone))
                   continue;
@@ -1265,7 +1491,7 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                cachedValid ? cachedMatch.b1 : 0.0,
                cachedValid ? cachedMatch.b2 : 0.0,
                cachedValid ? cachedMatch.c : 0.0,
-               cachedValid ? (cachedMatch.pointSpans[1] + 1) : -1,
+               cachedValid ? SpanToInclusiveBarCount(cachedMatch.pointSpans[1]) : -1,
                (cachedValid && cachedMatch.a > 0.0) ? ((cachedMatch.b1 + cachedMatch.b2) / cachedMatch.a) : 0.0,
                cachedValid && cachedMatch.preCondPriorDecline ? "true" : "false",
                cachedValid ? FormatTime(cachedMatch.pre0Time) : "n/a",
@@ -1283,7 +1509,7 @@ void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                legacyValid ? legacyMatch.b1 : 0.0,
                legacyValid ? legacyMatch.b2 : 0.0,
                legacyValid ? legacyMatch.c : 0.0,
-               legacyValid ? (legacyMatch.pointSpans[1] + 1) : -1,
+               legacyValid ? SpanToInclusiveBarCount(legacyMatch.pointSpans[1]) : -1,
                (legacyValid && legacyMatch.a > 0.0) ? ((legacyMatch.b1 + legacyMatch.b2) / legacyMatch.a) : 0.0,
                legacyValid && legacyMatch.preCondPriorDecline ? "true" : "false",
                legacyValid ? FormatTime(legacyMatch.pre0Time) : "n/a",
@@ -1336,6 +1562,7 @@ void ResetPattern(PatternSnapshot &pattern)
    pattern.condC = false;
    pattern.condD = false;
    pattern.condF = false;
+   pattern.profitTargetActive = false;
    pattern.referenceEntryPrice = 0.0;
    pattern.hardLossPrice = 0.0;
    pattern.softLossPrice = 0.0;
@@ -1354,11 +1581,43 @@ bool InRange(const double value, const double minValue, const double maxValue)
    return(value >= minValue && value <= maxValue);
   }
 
+int MiddleBarCountBetweenIndexes(const int startIndex, const int endIndex)
+  {
+   if(endIndex <= startIndex)
+      return(-1);
+   return(endIndex - startIndex - 1);
+  }
+
+int MaxPointIndexDistance()
+  {
+   return(InpAdjustPointMaxSpanKNumber + 1);
+  }
+
+int SpanToInclusiveBarCount(const int middleBarCount)
+  {
+   if(middleBarCount < 0)
+      return(0);
+   return(middleBarCount + 2);
+  }
+
+bool IsPointSpanWithinConfiguredRange(const int startIndex, const int endIndex)
+  {
+   const int span = MiddleBarCountBetweenIndexes(startIndex, endIndex);
+   if(span < 0)
+      return(false);
+   return(span >= InpAdjustPointMinSpanKNumber && span <= InpAdjustPointMaxSpanKNumber);
+  }
+
+bool IsProfitTargetActive(const PatternSnapshot &pattern)
+  {
+   return(pattern.profitTargetActive);
+  }
+
 bool MaxSpanWithinLimit(const PatternSnapshot &pattern)
   {
    for(int i = 0; i < 4; ++i)
      {
-      if(pattern.pointSpans[i] > InpAdjustPointMaxSpanKNumber)
+      if(pattern.pointSpans[i] < InpAdjustPointMinSpanKNumber || pattern.pointSpans[i] > InpAdjustPointMaxSpanKNumber)
          return(false);
      }
    return(true);
@@ -1465,8 +1724,8 @@ bool FindLowestQualifiedP5ActivationCandidate(const ManagedPositionState &state,
       candidate.p6Time = rates[bestP6Index].time;
       candidate.p5Price = p5Price;
       candidate.p6Price = bestP6Price;
-      candidate.p5Span = p5Index - searchStartIndex + 1;
-      candidate.p6Span = bestP6Index - p5Index;
+      candidate.p5Span = MiddleBarCountBetweenIndexes(searchStartIndex - 1, p5Index);
+      candidate.p6Span = MiddleBarCountBetweenIndexes(p5Index, bestP6Index);
       candidate.d = d;
       candidate.e = e;
       candidate.t5 = MinutesBetween(state.snapshot.pointTimes[4], candidate.p5Time);
@@ -1515,24 +1774,10 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
       return;
 
    if(tick.ask <= pattern.hardLossPrice)
-     {
-      PrintFormat("Skipping pattern because current ask is already below hard loss. symbol=%s p4_bar=%s ask=%.5f hard_loss=%.5f",
-                  pattern.symbol,
-                  FormatTime(pattern.p4BarTime),
-                  tick.ask,
-                  pattern.hardLossPrice);
       return;
-     }
 
-   if(tick.ask >= pattern.profitPrice)
-     {
-      PrintFormat("Skipping stale pattern because current ask is already beyond target. symbol=%s p4_bar=%s ask=%.5f target=%.5f",
-                  pattern.symbol,
-                  FormatTime(pattern.p4BarTime),
-                  tick.ask,
-                  pattern.profitPrice);
+   if(IsProfitTargetActive(pattern) && tick.ask >= pattern.profitPrice)
       return;
-     }
 
    const string orderComment = BuildOrderComment(pattern);
    const bool submitted = trade.Buy(InpFixedLots, pattern.symbol, 0.0, 0.0, 0.0, orderComment);
@@ -1558,7 +1803,9 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
    RegisterManagedPosition(ticket, pattern.symbol, pattern);
    state.lastSuccessfulEntryBarTime = pattern.p4BarTime;
    MarkBackboneSuccess(state, pattern, pattern.p4BarTime);
-   LogEntry(pattern, trade.ResultPrice(), orderComment, ticket);
+   string annotationStatus = "";
+   DrawEntryPatternAnnotation(pattern, ticket, annotationStatus);
+   LogEntry(pattern, trade.ResultPrice(), ticket, annotationStatus);
   }
 
 string BuildOrderComment(const PatternSnapshot &pattern)
@@ -1689,7 +1936,8 @@ void ManageOpenPositions(const string symbol)
          continue;
         }
 
-      if(currentBid >= g_positionStates[i].snapshot.profitPrice)
+      if(IsProfitTargetActive(g_positionStates[i].snapshot) &&
+         currentBid >= g_positionStates[i].snapshot.profitPrice)
         {
          CloseManagedPosition(i, "profit_target", currentBid);
          continue;
@@ -1727,23 +1975,13 @@ void UpdateSoftStopState(ManagedPositionState &state)
    state.snapshot.t[5] = candidate.t6;
    state.snapshot.softLossPrice = candidate.softLossPrice;
    state.snapshot.profitPrice = candidate.profitPrice;
+   state.snapshot.profitTargetActive = true;
    state.softStopActive = true;
    state.p5ActivationFrozen = true;
 
-   PrintFormat("Soft stop and P5-anchored profit activated. symbol=%s ticket=%I64u soft_loss=%.5f rewritten_profit=%.5f "
-               "selected_p5=(%s,%.5f) p6=(%s,%.5f) d=%.5f e=%.5f c=%.5f structure=%.5f",
-               state.symbol,
-               state.ticket,
-               state.snapshot.softLossPrice,
-               state.snapshot.profitPrice,
-               FormatTime(state.snapshot.pointTimes[5]),
-               state.snapshot.pointPrices[5],
-               FormatTime(state.snapshot.pointTimes[6]),
-               state.snapshot.pointPrices[6],
-               state.snapshot.d,
-               state.snapshot.e,
-               state.snapshot.c,
-               state.snapshot.a + state.snapshot.b1 + state.snapshot.b2);
+   string annotationStatus = "";
+   DrawEntryPatternAnnotation(state.snapshot, state.ticket, annotationStatus);
+
   }
 
 void CloseManagedPosition(const int stateIndex, const string reason, const double triggerPrice)
@@ -1783,50 +2021,22 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
         }
      }
 
-   LogExit(g_positionStates[stateIndex], reason, triggerPrice);
    RemovePositionState(stateIndex);
   }
 
-void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const string orderComment, const ulong ticket)
+void LogEntry(const PatternSnapshot &pattern,
+              const double executedPrice,
+              const ulong ticket,
+              const string annotationStatus)
   {
-   PrintFormat("ENTRY symbol=%s ticket=%I64u comment=%s p4_bar=%s executed=%.5f ref_p4=%.5f hard_loss=%.5f profit=%.5f "
-               "condB=%s r1=%.5f p3p4_drop_min_ratio=%.5f "
-               "a_min_price=%.5f p1p2_min_bars=%d bsum_min_ratio_of_a=%.5f bsum_max_ratio_of_a=%.5f "
-               "prior_decline=%s pre0=(%s,%.5f) pre0_drop=%.5f pre0_min_drop=%.5f pre0_bars_between=%d "
-               "spans=%d,%d,%d,%d p1p2_bars=%d bsum=%.5f bsum_min_allowed=%.5f bsum_max_allowed=%.5f bsum_ratio_of_a=%.5f "
-               "source=P0:Low,P1:High,P2:Low,P3:High,P4:Realtime,P5:Low,P6:High "
-               "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f) "
-               "a=%.5f b1=%.5f b2=%.5f c=%.5f r1=%.5f r2=%.5f t1=%.2f t2=%.2f t3=%.2f t4=%.2f total=%.2f",
+   PrintFormat("ENTRY_P4 symbol=%s ticket=%I64u p4_bar=%s executed=%.5f hard_loss=%.5f annotation=%s "
+               "P0=(%s,%.5f) P1=(%s,%.5f) P2=(%s,%.5f) P3=(%s,%.5f) P4=(%s,%.5f)",
                pattern.symbol,
                ticket,
-               orderComment,
                FormatTime(pattern.p4BarTime),
                executedPrice,
-               pattern.referenceEntryPrice,
                pattern.hardLossPrice,
-               pattern.profitPrice,
-               pattern.condB ? "true" : "false",
-               pattern.r1,
-               InpP3P4DropMinRatioOfStructure,
-               InpP1P2AValueSpaceMinPriceLimit,
-               InpP1P2AValueTimeMinKNumberLimit,
-               InpBSumValueMinRatioOfAValue,
-               InpBSumValueMaxRatioOfAValue,
-               pattern.preCondPriorDecline ? "true" : "false",
-               FormatTime(pattern.pre0Time),
-               pattern.pre0Price,
-               pattern.pre0Drop,
-               pattern.pre0MinRequiredDrop,
-               pattern.pre0BarsBetweenP0,
-               pattern.pointSpans[0],
-               pattern.pointSpans[1],
-               pattern.pointSpans[2],
-               pattern.pointSpans[3],
-               pattern.pointSpans[1] + 1,
-               pattern.b1 + pattern.b2,
-               InpBSumValueMinRatioOfAValue * pattern.a,
-               InpBSumValueMaxRatioOfAValue * pattern.a,
-               (pattern.a > 0.0) ? ((pattern.b1 + pattern.b2) / pattern.a) : 0.0,
+               annotationStatus,
                FormatTime(pattern.pointTimes[0]),
                pattern.pointPrices[0],
                FormatTime(pattern.pointTimes[1]),
@@ -1836,43 +2046,7 @@ void LogEntry(const PatternSnapshot &pattern, const double executedPrice, const 
                FormatTime(pattern.pointTimes[3]),
                pattern.pointPrices[3],
                FormatTime(pattern.pointTimes[4]),
-               pattern.pointPrices[4],
-               pattern.a,
-               pattern.b1,
-               pattern.b2,
-               pattern.c,
-               pattern.r1,
-               pattern.r2,
-               pattern.t[0],
-               pattern.t[1],
-               pattern.t[2],
-               pattern.t[3],
-               pattern.triggerPatternTotalTimeMinute);
-  }
-
-void LogExit(const ManagedPositionState &state, const string reason, const double executedPrice)
-  {
-   PrintFormat("EXIT symbol=%s ticket=%I64u reason=%s p4_bar=%s executed=%.5f hard_loss=%.5f soft_loss=%.5f profit=%.5f "
-               "source=P4:Realtime,P5:Low,P6:High "
-               "P4=(%s,%.5f) P5=(%s,%.5f) P6=(%s,%.5f) d=%.5f e=%.5f t5=%.2f t6=%.2f",
-               state.symbol,
-               state.ticket,
-               reason,
-               FormatTime(state.snapshot.p4BarTime),
-               executedPrice,
-               state.snapshot.hardLossPrice,
-               state.snapshot.softLossPrice,
-               state.snapshot.profitPrice,
-               FormatTime(state.snapshot.pointTimes[4]),
-               state.snapshot.pointPrices[4],
-               FormatTime(state.snapshot.pointTimes[5]),
-               state.snapshot.pointPrices[5],
-               FormatTime(state.snapshot.pointTimes[6]),
-               state.snapshot.pointPrices[6],
-               state.snapshot.d,
-               state.snapshot.e,
-               state.snapshot.t[4],
-               state.snapshot.t[5]);
+               pattern.pointPrices[4]);
   }
 
 string FormatTime(const datetime value)
