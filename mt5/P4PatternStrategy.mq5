@@ -23,15 +23,15 @@ input int InpLookbackBars = 300;
 input int InpAdjustPointMinSpanKNumber = 5;
 input int InpAdjustPointMaxSpanKNumber = 35;
 
-input double InpCondAXMin = 0.75;
-input double InpCondAXMax = 1.25;
+input double InpCondAXMin = 0.5;
+input double InpCondAXMax = 2.0;
 input double InpP3P4DropMinRatioOfStructure = 0.4;
 input double InpCondCZ = 1.0;
 input double InpP1P2AValueSpaceMinPriceLimit = 0.0;
 input int InpP1P2AValueTimeMinKNumberLimit = 1;
-input double InpBSumValueMinRatioOfAValue = 2.0;
+input double InpBSumValueMinRatioOfAValue = 1.5;
 input double InpBSumValueMaxRatioOfAValue = 5.0;
-input int InpPreCondPriorDeclineLookbackBars = 20;
+input int InpPreCondPriorDeclineLookbackBars = 30;
 input double InpPreCondPriorDeclineMinDropRatioOfStructure = 0.7;
 input int InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 = 0;
 

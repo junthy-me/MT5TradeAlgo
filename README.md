@@ -211,13 +211,13 @@
 
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
-| `InpCondAXMin` | `0.75` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
-| `InpCondAXMax` | `1.25` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
+| `InpCondAXMin` | `0.5` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
+| `InpCondAXMax` | `2.0` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
 | `InpP1P2AValueSpaceMinPriceLimit` | `0.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
 | `InpP1P2AValueTimeMinKNumberLimit` | `1` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
-| `InpBSumValueMinRatioOfAValue` | `2.0` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
+| `InpBSumValueMinRatioOfAValue` | `1.5` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
 | `InpBSumValueMaxRatioOfAValue` | `5.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
-| `InpPreCondPriorDeclineLookbackBars` | `20` | `Pre0` 前置下跌回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
+| `InpPreCondPriorDeclineLookbackBars` | `30` | `Pre0` 前置下跌回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
 | `InpPreCondPriorDeclineMinDropRatioOfStructure` | `0.7` | `Pre0->P0` 最小跌幅系数 | 要求跌幅 `> 该值 * (a+b1+b2)` |
 | `InpPreCondPriorDeclineMinBarsBetweenPre0AndP0` | `0` | `Pre0` 与 `P0` 最少间隔 bar 数 | 约束前置下跌与骨架之间的距离 |
 
