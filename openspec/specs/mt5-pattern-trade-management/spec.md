@@ -31,14 +31,26 @@ TBD - created by archiving change add-mt5-kline-pattern-strategy. Update Purpose
 - **THEN** 策略不会再为该共享骨架的后续 `P4` K 线柱提交新的买单
 
 ### Requirement: 仅在入场后确认条件满足时激活弱止损
-策略 SHALL 在入场时保持弱止损和止盈都未激活。只有在持仓首次出现满足 `e >= n * (c + d)` 的合格 `P5/P6` 候选集合时，策略才 SHALL 执行一次性激活流程：从该时刻全部合格 `P5` 候选中选择价格最低的 `selectedP5`，按 `soft_loss_price = InpSoftLossC * selectedP5` 激活弱止损，并同时按 `profit_price = selectedP5 + InpP5AnchoredProfitC * (a+b1+b2)` 激活唯一止盈价。一旦完成这次首次激活，策略 SHALL 冻结该持仓的 `selectedP5`、`soft_loss_price` 和 `profit_price`，后续新的 `P5/P6` 组合 SHALL NOT 再次改写这些价位。
+策略 SHALL 在入场时保持弱止损和止盈都未激活。入场完成后，策略 SHALL 基于该持仓之后的 tick 序列追踪 `P5/P6`，并且只 SHALL 接受满足严格时间顺序 `tP4 < tP5 < tP6` 的事件组合。`P4`、`P5`、`P6` 可以落在同一根 K 线上，也可以落在不同 K 线上；但如果它们落在同一根 K 线上，策略仍 SHALL 使用各自对应的 tick 时间来保证顺序。只有在持仓首次出现满足 `e >= n * (c + d)` 的合格 `P5/P6` 事件集合时，策略才 SHALL 执行一次性激活流程：从该时刻全部已观察到且满足顺序约束的合格 `P5` 候选中选择价格最低的 `selectedP5`，按 `soft_loss_price = InpSoftLossC * selectedP5` 激活弱止损，并同时按 `profit_price = selectedP5 + InpP5AnchoredProfitC * (a+b1+b2)` 激活唯一止盈价。一旦完成这次首次激活，策略 SHALL 冻结该持仓的 `selectedP5`、`P6`、`soft_loss_price` 和 `profit_price`，后续新的 `P5/P6` 组合 SHALL NOT 再次改写这些价位。仅因为某根 K 线的最终 `low/high` 满足价格关系，但无法证明对应事件发生在 `P4` 之后或 `P5` 之后，策略 SHALL NOT 将其视为有效 `P5/P6`。
 
 #### Scenario: 首次满足条件时同时激活弱止损和唯一止盈价
-- **WHEN** 一个由 EA 管理的持仓首次观测到合格 `P5/P6` 候选集合，且满足 `e >= n * (c + d)`
-- **THEN** 策略从该时刻全部合格 `P5` 候选中选择价格最低的 `selectedP5`，并一次性同时设置弱止损价与唯一止盈价
+- **WHEN** 一个由 EA 管理的持仓首次观测到合格 `P5/P6` 事件集合，且满足 `e >= n * (c + d)`
+- **THEN** 策略从该时刻全部已观察到且满足顺序约束的合格 `P5` 候选中选择价格最低的 `selectedP5`，并一次性同时设置弱止损价与唯一止盈价
+
+#### Scenario: P4 P5 P6 可以在同一根 K 线上成立
+- **WHEN** `P4` 入场之后的后续 tick 在同一根 K 线上先形成有效 `P5`，随后又在同一根 K 线上形成有效 `P6`
+- **THEN** 只要满足严格时间顺序 `tP4 < tP5 < tP6`，策略就允许用这组三点完成 `P5/P6` 激活
+
+#### Scenario: 同一根 K 线中早于 P4 的低点不得当作 P5
+- **WHEN** `P4` 所在 K 线的最终低点发生在实际入场 tick 之前
+- **THEN** 策略不会仅因为该 bar 的最终 `low` 低于 `P4` 价格就把它认定为有效 `P5`
+
+#### Scenario: 同一根 K 线中早于 P5 的高点不得当作 P6
+- **WHEN** 某根 K 线的最终高点出现在候选 `P5` 事件之前
+- **THEN** 策略不会仅因为该 bar 的最终 `high` 满足反弹幅度要求就把它认定为该候选 `P5` 的有效 `P6`
 
 #### Scenario: 多个合格 P5 候选时选择最低价 P5
-- **WHEN** 一个由 EA 管理的持仓在首次满足激活条件的时刻存在多个都可构成合格 `P5/P6` 的 `P5` 候选
+- **WHEN** 一个由 EA 管理的持仓在首次满足激活条件的时刻存在多个都可构成合格 `P5/P6` 的 `P5` 候选，且这些候选都满足 `tP4 < tP5 < tP6`
 - **THEN** 策略选择其中价格最低的 `P5` 作为 `selectedP5`
 
 #### Scenario: 首次激活后后续新的 P5P6 组合不再改写价位

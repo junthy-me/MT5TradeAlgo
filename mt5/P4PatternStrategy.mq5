@@ -9,7 +9,7 @@
 #define HISTORY_CANDIDATE_GROWTH_STEP 512
 
 input string InpSymbols = "XAUUSD";
-input ENUM_TIMEFRAMES InpTF = PERIOD_M15;
+input ENUM_TIMEFRAMES InpTF = PERIOD_M10;
 input int InpTimerMillSec = 100;
 input long InpMagic = 9527001;
 input string InpComment = "P4PatternStrategy";
@@ -17,27 +17,28 @@ input string InpComment = "P4PatternStrategy";
 input double InpFixedLots = 0.05;
 input int InpMaxPositionsPerSymbol = 1;
 input int InpSlippagePoints = 20;
-input int InpProfitObservationBars = 30;
-input int InpStopObservationBars = 30;
+input int InpProfitObservationBars = 10;
+input int InpStopObservationBars = 10;
 input int InpLookbackBars = 300;
-input int InpAdjustPointMinSpanKNumber = 5;
+input int InpAdjustPointMinSpanKNumber = 3;
 input int InpAdjustPointMaxSpanKNumber = 35;
 
-input double InpCondAXMin = 0.5;
-input double InpCondAXMax = 2.0;
-input double InpP3P4DropMinRatioOfStructure = 0.4;
+input double InpCondAXMin = 0.75;
+input double InpCondAXMax = 1.25;
+input double InpP3P4DropMinRatioOfStructure = 0.44;
 input double InpCondCZ = 1.0;
 input double InpP1P2AValueSpaceMinPriceLimit = 0.0;
 input int InpP1P2AValueTimeMinKNumberLimit = 1;
-input double InpBSumValueMinRatioOfAValue = 1.5;
-input double InpBSumValueMaxRatioOfAValue = 5.0;
+input double InpBSumValueMinRatioOfAValue = 2.0;
+input double InpBSumValueMaxRatioOfAValue = 10.0;
+input bool InpPreCondEnable = false;
 input int InpPreCondPriorDeclineLookbackBars = 30;
-input double InpPreCondPriorDeclineMinDropRatioOfStructure = 0.7;
+input double InpPreCondPriorDeclineMinDropRatioOfStructure = 0.45;
 input int InpPreCondPriorDeclineMinBarsBetweenPre0AndP0 = 0;
 
-input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.65;
+input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.55;
 input double InpSoftLossC = 1.0;
-input double InpP5AnchoredProfitC = 0.7;
+input double InpP5AnchoredProfitC = 1.0;
 input bool InpEnableExactSearchCompare = false;
 
 struct PatternSnapshot
@@ -47,6 +48,7 @@ struct PatternSnapshot
    int               pointIndexes[PATTERN_POINT_COUNT];
    datetime          p4BarTime;
    datetime          pointTimes[PATTERN_POINT_COUNT];
+   long              pointTimesMsc[PATTERN_POINT_COUNT];
    double            pointPrices[PATTERN_POINT_COUNT];
    int               pointSpans[PATTERN_SEGMENT_COUNT];
    double            spanValues[PATTERN_SEGMENT_COUNT];
@@ -106,6 +108,28 @@ struct SymbolRuntimeState
    BackboneSuccessState backboneSuccesses[];
   };
 
+struct P5ActivationCandidate
+  {
+   bool              valid;
+   int               p5Index;
+   int               p6Index;
+   datetime          p5Time;
+   datetime          p6Time;
+   long              p5TimeMsc;
+   long              p6TimeMsc;
+   double            p5Price;
+   double            p6Price;
+   int               p5Span;
+   int               p6Span;
+   double            d;
+   double            e;
+   double            t5;
+   double            t6;
+   double            barHighAtP5Confirmation;
+   double            softLossPrice;
+   double            profitPrice;
+  };
+
 struct ManagedPositionState
   {
    bool              active;
@@ -115,25 +139,16 @@ struct ManagedPositionState
    PatternSnapshot   snapshot;
    bool              softStopActive;
    bool              p5ActivationFrozen;
-  };
-
-struct P5ActivationCandidate
-  {
-   bool              valid;
-   int               p5Index;
-   int               p6Index;
-   datetime          p5Time;
-   datetime          p6Time;
-   double            p5Price;
-   double            p6Price;
-   int               p5Span;
-   int               p6Span;
-   double            d;
-   double            e;
-   double            t5;
-   double            t6;
-   double            softLossPrice;
-   double            profitPrice;
+   bool              intrabarTrackingInitialized;
+   double            intrabarLastBid;
+   double            entryBarLowAtP4;
+   double            intrabarCurrentLowPrice;
+   datetime          intrabarCurrentLowTime;
+   long              intrabarCurrentLowTimeMsc;
+   bool              intrabarCurrentLowConfirmed;
+   int               observedP5CandidateCount;
+   int               observedP5CandidateCapacity;
+   P5ActivationCandidate observedP5Candidates[];
   };
 
 CTrade trade;
@@ -353,14 +368,12 @@ void ProcessSymbol(const string symbol)
    if(currentBarTime <= 0)
       return;
 
-   const bool hasCachedMatch = EvaluateCachedRealtimePattern(g_symbolStates[stateIndex], tick, match);
+   const bool hasCachedMatch = EvaluateCachedRealtimePattern(g_symbolStates[stateIndex], tick, currentBarTime, match);
    if(InpEnableExactSearchCompare)
-      CompareCachedAndLegacySearch(g_symbolStates[stateIndex], tick, hasCachedMatch, match);
+      CompareCachedAndLegacySearch(g_symbolStates[stateIndex], tick, currentBarTime, hasCachedMatch, match);
 
    if(!hasCachedMatch)
       return;
-
-   match.p4BarTime = currentBarTime;
 
    if(match.pointTimes[4] <= g_symbolStates[stateIndex].lastEvaluatedP4Time &&
       match.pointPrices[4] == g_symbolStates[stateIndex].lastEvaluatedP4Price)
@@ -725,6 +738,15 @@ color GetAnnotationPointColor(const string pointLabel)
    return(clrWhiteSmoke);
   }
 
+ENUM_ANCHOR_POINT GetAnnotationPointAnchor(const string pointLabel)
+  {
+   if(pointLabel == "P5")
+      return(ANCHOR_LEFT_UPPER);
+   if(pointLabel == "P6")
+      return(ANCHOR_RIGHT_LOWER);
+   return(ANCHOR_LEFT_LOWER);
+  }
+
 datetime MidTime(const datetime lhs, const datetime rhs)
   {
    if(lhs <= 0)
@@ -807,7 +829,7 @@ bool CreateAnnotationPoint(const long chartId,
    ConfigureAnnotationObject(chartId, textName);
    ObjectSetInteger(chartId, textName, OBJPROP_COLOR, pointColor);
    ObjectSetString(chartId, textName, OBJPROP_TEXT, pointLabel);
-   ObjectSetInteger(chartId, textName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(chartId, textName, OBJPROP_ANCHOR, GetAnnotationPointAnchor(pointLabel));
    ObjectSetInteger(chartId, textName, OBJPROP_FONTSIZE, 10);
    return(true);
   }
@@ -1007,6 +1029,44 @@ bool SegmentHasDescendingEndpointExtrema(const string symbol,
    return(SegmentEndpointsReachExtrema(symbol, rates, startIndex, endIndex, true, false));
   }
 
+void ResetPriorDeclineState(PatternSnapshot &pattern)
+  {
+   pattern.preCondPriorDecline = false;
+   pattern.pre0Index = -1;
+   pattern.pre0Time = 0;
+   pattern.pre0Price = 0.0;
+   pattern.pre0Drop = 0.0;
+   pattern.pre0MinRequiredDrop = 0.0;
+   pattern.pre0BarsBetweenP0 = -1;
+  }
+
+bool GetP3P4SegmentHighStats(const string symbol,
+                             const datetime p3Time,
+                             const double p3Price,
+                             const datetime p4BarTime,
+                             double &segmentHigh,
+                             bool &hasAdditionalTieHigh)
+  {
+   const int p3Shift = iBarShift(symbol, InpTF, p3Time, false);
+   const int p4Shift = iBarShift(symbol, InpTF, p4BarTime, false);
+   if(p3Shift < 0 || p4Shift < 0 || p3Shift < p4Shift)
+      return(false);
+
+   const double normalizedP3Price = NormalizePrice(symbol, p3Price);
+   segmentHigh = normalizedP3Price;
+   hasAdditionalTieHigh = false;
+   for(int shift = p4Shift; shift <= p3Shift; ++shift)
+     {
+      const double barHigh = NormalizePrice(symbol, iHigh(symbol, InpTF, shift));
+      if(barHigh > segmentHigh)
+         segmentHigh = barHigh;
+      if(shift != p3Shift && barHigh == normalizedP3Price)
+         hasAdditionalTieHigh = true;
+     }
+
+   return(true);
+  }
+
 void ResetHistoryCache(SymbolRuntimeState &state)
   {
    state.historyCacheReady = false;
@@ -1114,7 +1174,7 @@ bool EvaluatePriorDeclinePrecondition(MqlRates &rates[], PatternSnapshot &patter
    if(endIndex < startIndex)
       return(false);
 
-   const double structureValue = pattern.a + pattern.b1 + pattern.b2;
+   const double structureValue = pattern.a + pattern.b1;
    const double minRequiredDrop = NormalizePrice(pattern.symbol,
                                                  InpPreCondPriorDeclineMinDropRatioOfStructure * structureValue);
    int bestIndex = -1;
@@ -1122,7 +1182,7 @@ bool EvaluatePriorDeclinePrecondition(MqlRates &rates[], PatternSnapshot &patter
    double bestDrop = 0.0;
    int bestBarsBetween = -1;
 
-   pattern.preCondPriorDecline = false;
+   ResetPriorDeclineState(pattern);
    pattern.pre0MinRequiredDrop = minRequiredDrop;
 
    for(int i = startIndex; i <= endIndex; ++i)
@@ -1164,6 +1224,12 @@ bool EvaluatePriorDeclinePrecondition(MqlRates &rates[], PatternSnapshot &patter
 // growing the historical backbone filter into a single monolithic condition.
 bool EvaluatePatternPreconditions(MqlRates &rates[], PatternSnapshot &pattern)
   {
+   if(!InpPreCondEnable)
+     {
+      ResetPriorDeclineState(pattern);
+      return(true);
+     }
+
    return(EvaluatePriorDeclinePrecondition(rates, pattern));
   }
 
@@ -1210,6 +1276,10 @@ bool BuildHistoricalBackbone(const string symbol,
    pattern.pointTimes[1] = rates[i1].time;
    pattern.pointTimes[2] = rates[i2].time;
    pattern.pointTimes[3] = rates[i3].time;
+   pattern.pointTimesMsc[0] = ((long)rates[i0].time) * 1000;
+   pattern.pointTimesMsc[1] = ((long)rates[i1].time) * 1000;
+   pattern.pointTimesMsc[2] = ((long)rates[i2].time) * 1000;
+   pattern.pointTimesMsc[3] = ((long)rates[i3].time) * 1000;
 
    pattern.pointPrices[0] = NormalizePrice(symbol, p0);
    pattern.pointPrices[1] = NormalizePrice(symbol, p1);
@@ -1375,6 +1445,7 @@ bool RefreshHistoricalCache(SymbolRuntimeState &state)
 
 bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
                                          const MqlTick &tick,
+                                         const datetime currentBarTime,
                                          PatternSnapshot &pattern)
   {
    pattern = backbone;
@@ -1388,6 +1459,8 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
       return(false);
 
    pattern.pointTimes[4] = tick.time;
+   pattern.pointTimesMsc[4] = tick.time_msc;
+   pattern.p4BarTime = currentBarTime;
    pattern.pointPrices[4] = NormalizePrice(pattern.symbol, p4);
    pattern.c = NormalizePrice(pattern.symbol, c);
    pattern.r1 = (pattern.a + pattern.b1 + pattern.b2 > 0.0) ? pattern.c / (pattern.a + pattern.b1 + pattern.b2) : 0.0;
@@ -1399,6 +1472,36 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
    pattern.condB = pattern.r1 >= InpP3P4DropMinRatioOfStructure;
    pattern.condC = pattern.t[3] < (InpCondCZ * (pattern.t[0] + pattern.t[1] + pattern.t[2]));
    pattern.condD = true;
+
+   double p34SegmentHigh = 0.0;
+   bool p34HasAdditionalTieHigh = false;
+   if(!GetP3P4SegmentHighStats(pattern.symbol, pattern.pointTimes[3], pattern.pointPrices[3], currentBarTime,
+                               p34SegmentHigh, p34HasAdditionalTieHigh))
+     {
+      ResetPattern(pattern);
+      return(false);
+     }
+
+   if(p34SegmentHigh > pattern.pointPrices[3])
+     {
+      if(InpEnableExactSearchCompare)
+         PrintFormat("P34_EXTREMA_REJECT symbol=%s p3=(%s,%.5f) p4_bar=%s segment_high=%.5f",
+                     pattern.symbol,
+                     FormatTime(pattern.pointTimes[3]),
+                     pattern.pointPrices[3],
+                     FormatTime(currentBarTime),
+                     p34SegmentHigh);
+      ResetPattern(pattern);
+      return(false);
+     }
+
+   if(InpEnableExactSearchCompare && p34HasAdditionalTieHigh)
+      PrintFormat("P34_EXTREMA_TIE symbol=%s p3=(%s,%.5f) p4_bar=%s segment_high=%.5f",
+                  pattern.symbol,
+                  FormatTime(pattern.pointTimes[3]),
+                  pattern.pointPrices[3],
+                  FormatTime(currentBarTime),
+                  p34SegmentHigh);
 
    if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condF))
      {
@@ -1431,6 +1534,7 @@ bool IsPreferredMatch(const PatternSnapshot &candidate, const PatternSnapshot &b
 
 bool EvaluateCachedRealtimePattern(SymbolRuntimeState &state,
                                    const MqlTick &tick,
+                                   const datetime currentBarTime,
                                    PatternSnapshot &match)
   {
    if(!state.historyCacheReady || state.historyCandidateCount <= 0)
@@ -1441,7 +1545,7 @@ bool EvaluateCachedRealtimePattern(SymbolRuntimeState &state,
    for(int i = 0; i < state.historyCandidateCount; ++i)
      {
       PatternSnapshot candidate;
-      if(EvaluateRealtimePatternFromBackbone(state.historyCandidates[i], tick, candidate))
+      if(EvaluateRealtimePatternFromBackbone(state.historyCandidates[i], tick, currentBarTime, candidate))
          if(IsPreferredMatch(candidate, best))
             best = candidate;
      }
@@ -1455,6 +1559,7 @@ bool EvaluateCachedRealtimePattern(SymbolRuntimeState &state,
 
 bool FindLatestPatternLegacyExact(const string symbol,
                                   const MqlTick &tick,
+                                  const datetime currentBarTime,
                                   PatternSnapshot &match)
   {
    MqlRates rates[];
@@ -1491,7 +1596,7 @@ bool FindLatestPatternLegacyExact(const string symbol,
                   continue;
 
                PatternSnapshot candidate;
-               if(!EvaluateRealtimePatternFromBackbone(backbone, tick, candidate))
+               if(!EvaluateRealtimePatternFromBackbone(backbone, tick, currentBarTime, candidate))
                   continue;
 
                if(IsPreferredMatch(candidate, best))
@@ -1542,11 +1647,12 @@ bool ArePatternsEquivalent(const bool lhsValid,
 
 void CompareCachedAndLegacySearch(SymbolRuntimeState &state,
                                   const MqlTick &tick,
+                                  const datetime currentBarTime,
                                   const bool cachedValid,
                                   const PatternSnapshot &cachedMatch)
   {
    PatternSnapshot legacyMatch;
-   const bool legacyValid = FindLatestPatternLegacyExact(state.symbol, tick, legacyMatch);
+   const bool legacyValid = FindLatestPatternLegacyExact(state.symbol, tick, currentBarTime, legacyMatch);
    if(ArePatternsEquivalent(cachedValid, cachedMatch, legacyValid, legacyMatch))
       return;
 
@@ -1609,6 +1715,7 @@ void ResetPattern(PatternSnapshot &pattern)
      {
       pattern.pointIndexes[i] = -1;
       pattern.pointTimes[i] = 0;
+      pattern.pointTimesMsc[i] = 0;
       pattern.pointPrices[i] = 0.0;
      }
    for(int i = 0; i < PATTERN_SEGMENT_COUNT; ++i)
@@ -1627,13 +1734,7 @@ void ResetPattern(PatternSnapshot &pattern)
    pattern.r2 = 0.0;
    pattern.sspanmin = 0.0;
    pattern.triggerPatternTotalTimeMinute = 0.0;
-   pattern.preCondPriorDecline = false;
-   pattern.pre0Index = -1;
-   pattern.pre0Time = 0;
-   pattern.pre0Price = 0.0;
-   pattern.pre0Drop = 0.0;
-   pattern.pre0MinRequiredDrop = 0.0;
-   pattern.pre0BarsBetweenP0 = -1;
+   ResetPriorDeclineState(pattern);
    pattern.condA = false;
    pattern.condB = false;
    pattern.condC = false;
@@ -1651,6 +1752,13 @@ double MinutesBetween(const datetime fromTime, const datetime toTime)
    if(toTime <= fromTime)
       return(0.0);
    return((double)(toTime - fromTime) / 60.0);
+  }
+
+double MinutesBetweenMsc(const long fromTimeMsc, const long toTimeMsc)
+  {
+   if(toTimeMsc <= fromTimeMsc)
+      return(0.0);
+   return((double)(toTimeMsc - fromTimeMsc) / 60000.0);
   }
 
 bool InRange(const double value, const double minValue, const double maxValue)
@@ -1728,6 +1836,8 @@ void ResetP5ActivationCandidate(P5ActivationCandidate &candidate)
    candidate.p6Index = -1;
    candidate.p5Time = 0;
    candidate.p6Time = 0;
+   candidate.p5TimeMsc = 0;
+   candidate.p6TimeMsc = 0;
    candidate.p5Price = 0.0;
    candidate.p6Price = 0.0;
    candidate.p5Span = 0;
@@ -1736,79 +1846,173 @@ void ResetP5ActivationCandidate(P5ActivationCandidate &candidate)
    candidate.e = 0.0;
    candidate.t5 = 0.0;
    candidate.t6 = 0.0;
+   candidate.barHighAtP5Confirmation = 0.0;
    candidate.softLossPrice = 0.0;
    candidate.profitPrice = 0.0;
   }
 
+void ResetIntrabarTrackingState(ManagedPositionState &state)
+  {
+   state.intrabarTrackingInitialized = false;
+   state.intrabarLastBid = 0.0;
+   state.entryBarLowAtP4 = 0.0;
+   state.intrabarCurrentLowPrice = 0.0;
+   state.intrabarCurrentLowTime = 0;
+   state.intrabarCurrentLowTimeMsc = 0;
+   state.intrabarCurrentLowConfirmed = false;
+   state.observedP5CandidateCount = 0;
+   state.observedP5CandidateCapacity = 0;
+   ArrayResize(state.observedP5Candidates, 0);
+  }
+
+bool EnsureObservedP5CandidateCapacity(ManagedPositionState &state, const int required)
+  {
+   if(required <= state.observedP5CandidateCapacity)
+      return(true);
+
+   int capacity = state.observedP5CandidateCapacity;
+   if(capacity <= 0)
+      capacity = 8;
+   while(capacity < required)
+      capacity *= 2;
+
+   if(ArrayResize(state.observedP5Candidates, capacity) != capacity)
+      return(false);
+
+   state.observedP5CandidateCapacity = capacity;
+   return(true);
+  }
+
+bool AppendObservedP5Candidate(ManagedPositionState &state,
+                               const datetime p5Time,
+                               const long p5TimeMsc,
+                               const double p5Price)
+  {
+   const int nextIndex = state.observedP5CandidateCount;
+   if(!EnsureObservedP5CandidateCapacity(state, nextIndex + 1))
+      return(false);
+
+   ResetP5ActivationCandidate(state.observedP5Candidates[nextIndex]);
+   state.observedP5Candidates[nextIndex].valid = true;
+   state.observedP5Candidates[nextIndex].p5Time = p5Time;
+   state.observedP5Candidates[nextIndex].p5TimeMsc = p5TimeMsc;
+   state.observedP5Candidates[nextIndex].p5Price = p5Price;
+   state.observedP5Candidates[nextIndex].barHighAtP5Confirmation =
+      NormalizePrice(state.symbol, iHigh(state.symbol, InpTF, 0));
+   state.observedP5CandidateCount++;
+   return(true);
+  }
+
+void UpdateObservedP6Candidates(ManagedPositionState &state,
+                                const datetime tickTime,
+                                const long tickTimeMsc,
+                                const double tickPrice)
+  {
+   for(int i = 0; i < state.observedP5CandidateCount; ++i)
+     {
+      if(!state.observedP5Candidates[i].valid)
+         continue;
+      if(tickTimeMsc <= state.observedP5Candidates[i].p5TimeMsc)
+         continue;
+      if(tickPrice <= state.observedP5Candidates[i].p5Price)
+         continue;
+      if(state.observedP5Candidates[i].p6TimeMsc > 0 &&
+         tickPrice <= state.observedP5Candidates[i].p6Price)
+         continue;
+
+      state.observedP5Candidates[i].p6Time = tickTime;
+      state.observedP5Candidates[i].p6TimeMsc = tickTimeMsc;
+      state.observedP5Candidates[i].p6Price = tickPrice;
+     }
+  }
+
+void TrackIntrabarP5P6State(ManagedPositionState &state, const MqlTick &tick)
+  {
+   const long p4TimeMsc = state.snapshot.pointTimesMsc[4];
+   if(tick.time_msc <= p4TimeMsc)
+      return;
+
+   const double tickBid = NormalizePrice(state.symbol, tick.bid);
+   UpdateObservedP6Candidates(state, tick.time, tick.time_msc, tickBid);
+
+   if(!state.intrabarTrackingInitialized)
+     {
+      state.intrabarTrackingInitialized = true;
+      state.intrabarLastBid = tickBid;
+      state.intrabarCurrentLowPrice = tickBid;
+      state.intrabarCurrentLowTime = tick.time;
+      state.intrabarCurrentLowTimeMsc = tick.time_msc;
+      state.intrabarCurrentLowConfirmed = false;
+      return;
+     }
+
+   if(tickBid < state.intrabarCurrentLowPrice ||
+      (state.intrabarCurrentLowConfirmed && tickBid < state.intrabarLastBid))
+     {
+      state.intrabarCurrentLowPrice = tickBid;
+      state.intrabarCurrentLowTime = tick.time;
+      state.intrabarCurrentLowTimeMsc = tick.time_msc;
+      state.intrabarCurrentLowConfirmed = false;
+     }
+   else if(tickBid > state.intrabarCurrentLowPrice &&
+           !state.intrabarCurrentLowConfirmed &&
+           state.intrabarCurrentLowPrice < state.snapshot.pointPrices[4] &&
+           state.intrabarCurrentLowTimeMsc > p4TimeMsc)
+     {
+      AppendObservedP5Candidate(state,
+                                state.intrabarCurrentLowTime,
+                                state.intrabarCurrentLowTimeMsc,
+                                state.intrabarCurrentLowPrice);
+      state.intrabarCurrentLowConfirmed = true;
+      UpdateObservedP6Candidates(state, tick.time, tick.time_msc, tickBid);
+     }
+
+   state.intrabarLastBid = tickBid;
+  }
+
 bool FindLowestQualifiedP5ActivationCandidate(const ManagedPositionState &state,
-                                              MqlRates &rates[],
                                               P5ActivationCandidate &candidate)
   {
    ResetP5ActivationCandidate(candidate);
 
-   const int total = ArraySize(rates);
-   int searchStartIndex = -1;
-   for(int i = 0; i < total; ++i)
-     {
-      if(rates[i].time > state.snapshot.pointTimes[4])
-        {
-         searchStartIndex = i;
-         break;
-        }
-     }
-
-   if(searchStartIndex < 0 || searchStartIndex >= total - 1)
-      return(false);
-
    const double structureValue = state.snapshot.a + state.snapshot.b1 + state.snapshot.b2;
    const double p4Price = state.snapshot.pointPrices[4];
-   for(int p5Index = searchStartIndex; p5Index < total - 1; ++p5Index)
+   for(int i = 0; i < state.observedP5CandidateCount; ++i)
      {
-      const double p5Price = NormalizePrice(state.symbol, GetRoleLow(rates[p5Index]));
-      if(p5Price >= p4Price)
+      P5ActivationCandidate observed = state.observedP5Candidates[i];
+      if(!observed.valid)
+         continue;
+      if(observed.p5TimeMsc <= state.snapshot.pointTimesMsc[4] ||
+         observed.p6TimeMsc <= observed.p5TimeMsc)
          continue;
 
-      int bestP6Index = -1;
-      double bestP6Price = 0.0;
-      for(int p6Index = p5Index + 1; p6Index < total; ++p6Index)
-        {
-         const double currentP6Price = NormalizePrice(state.symbol, GetRoleHigh(rates[p6Index]));
-         if(bestP6Index < 0 || currentP6Price > bestP6Price)
-           {
-            bestP6Index = p6Index;
-            bestP6Price = currentP6Price;
-           }
-        }
-
-      if(bestP6Index < 0 || bestP6Price <= p5Price)
-         continue;
-
-      const double d = NormalizePrice(state.symbol, p4Price - p5Price);
-      const double e = NormalizePrice(state.symbol, bestP6Price - p5Price);
+      const double d = NormalizePrice(state.symbol, p4Price - observed.p5Price);
+      const double e = NormalizePrice(state.symbol, observed.p6Price - observed.p5Price);
       if(d <= 0.0 || e <= 0.0)
          continue;
-
       if(e < (InpP5P6ReboundMinRatioOfP3P5Drop * (state.snapshot.c + d)))
          continue;
-
-      if(candidate.valid && p5Price >= candidate.p5Price)
+      if(candidate.valid && observed.p5Price >= candidate.p5Price)
          continue;
 
       candidate.valid = true;
-      candidate.p5Index = p5Index;
-      candidate.p6Index = bestP6Index;
-      candidate.p5Time = rates[p5Index].time;
-      candidate.p6Time = rates[bestP6Index].time;
-      candidate.p5Price = p5Price;
-      candidate.p6Price = bestP6Price;
-      candidate.p5Span = MiddleBarCountBetweenIndexes(searchStartIndex - 1, p5Index);
-      candidate.p6Span = MiddleBarCountBetweenIndexes(p5Index, bestP6Index);
+      candidate.p5Index = -1;
+      candidate.p6Index = -1;
+      candidate.p5Time = observed.p5Time;
+      candidate.p6Time = observed.p6Time;
+      candidate.p5TimeMsc = observed.p5TimeMsc;
+      candidate.p6TimeMsc = observed.p6TimeMsc;
+      candidate.p5Price = observed.p5Price;
+      candidate.p6Price = observed.p6Price;
+      candidate.p5Span = 0;
+      candidate.p6Span = 0;
       candidate.d = d;
       candidate.e = e;
-      candidate.t5 = MinutesBetween(state.snapshot.pointTimes[4], candidate.p5Time);
-      candidate.t6 = MinutesBetween(candidate.p5Time, candidate.p6Time);
-      candidate.softLossPrice = NormalizePrice(state.symbol, InpSoftLossC * p5Price);
-      candidate.profitPrice = NormalizePrice(state.symbol, p5Price + InpP5AnchoredProfitC * structureValue);
+      candidate.t5 = MinutesBetweenMsc(state.snapshot.pointTimesMsc[4], candidate.p5TimeMsc);
+      candidate.t6 = MinutesBetweenMsc(candidate.p5TimeMsc, candidate.p6TimeMsc);
+      candidate.barHighAtP5Confirmation = observed.barHighAtP5Confirmation;
+      candidate.softLossPrice = NormalizePrice(state.symbol, InpSoftLossC * observed.p5Price);
+      candidate.profitPrice = NormalizePrice(state.symbol, observed.p5Price + InpP5AnchoredProfitC * structureValue);
      }
 
    return(candidate.valid);
@@ -1941,6 +2145,8 @@ void RegisterManagedPosition(const ulong ticket, const string symbol, const Patt
    g_positionStates[index].snapshot = pattern;
    g_positionStates[index].softStopActive = false;
    g_positionStates[index].p5ActivationFrozen = false;
+   ResetIntrabarTrackingState(g_positionStates[index]);
+   g_positionStates[index].entryBarLowAtP4 = NormalizePrice(symbol, iLow(symbol, InpTF, 0));
   }
 
 int FindManagedPositionState(const ulong ticket)
@@ -1997,7 +2203,7 @@ void ManageOpenPositions(const string symbol)
          continue;
         }
 
-      UpdateSoftStopState(g_positionStates[i]);
+      UpdateSoftStopState(g_positionStates[i], tick);
 
       const double currentBid = tick.bid;
       if(currentBid <= g_positionStates[i].snapshot.hardLossPrice)
@@ -2022,23 +2228,23 @@ void ManageOpenPositions(const string symbol)
      }
   }
 
-void UpdateSoftStopState(ManagedPositionState &state)
+void UpdateSoftStopState(ManagedPositionState &state, const MqlTick &tick)
   {
    if(state.p5ActivationFrozen)
       return;
 
-   MqlRates rates[];
-   if(!LoadClosedRates(state.symbol, rates))
-      return;
+   TrackIntrabarP5P6State(state, tick);
 
    P5ActivationCandidate candidate;
-   if(!FindLowestQualifiedP5ActivationCandidate(state, rates, candidate))
+   if(!FindLowestQualifiedP5ActivationCandidate(state, candidate))
       return;
 
    state.snapshot.pointIndexes[5] = candidate.p5Index;
    state.snapshot.pointIndexes[6] = candidate.p6Index;
    state.snapshot.pointTimes[5] = candidate.p5Time;
    state.snapshot.pointTimes[6] = candidate.p6Time;
+   state.snapshot.pointTimesMsc[5] = candidate.p5TimeMsc;
+   state.snapshot.pointTimesMsc[6] = candidate.p6TimeMsc;
    state.snapshot.pointPrices[5] = candidate.p5Price;
    state.snapshot.pointPrices[6] = candidate.p6Price;
    state.snapshot.pointSpans[4] = candidate.p5Span;
@@ -2058,6 +2264,11 @@ void UpdateSoftStopState(ManagedPositionState &state)
 
    string annotationStatus = "";
    DrawEntryPatternAnnotation(state.snapshot, state.ticket, annotationStatus);
+   LogP5Activation(state.snapshot,
+                   state.ticket,
+                   annotationStatus,
+                   state.entryBarLowAtP4,
+                   candidate.barHighAtP5Confirmation);
 
   }
 
@@ -2122,8 +2333,44 @@ void LogEntry(const PatternSnapshot &pattern,
                pattern.pointPrices[2],
                FormatTime(pattern.pointTimes[3]),
                pattern.pointPrices[3],
-               FormatTime(pattern.pointTimes[4]),
+               FormatTimeMsc(pattern.pointTimesMsc[4]),
                pattern.pointPrices[4]);
+
+   if(InpEnableExactSearchCompare)
+      PrintFormat("ENTRY_DIAG symbol=%s ticket=%I64u precond_enabled=%s precond_matched=%s "
+                  "pre0=(%s,%.5f) pre0_drop=%.5f pre0_min_drop=%.5f",
+                  pattern.symbol,
+                  ticket,
+                  InpPreCondEnable ? "true" : "false",
+                  pattern.preCondPriorDecline ? "true" : "false",
+                  pattern.preCondPriorDecline ? FormatTime(pattern.pre0Time) : "n/a",
+                  pattern.preCondPriorDecline ? pattern.pre0Price : 0.0,
+                  pattern.pre0Drop,
+                  pattern.pre0MinRequiredDrop);
+  }
+
+void LogP5Activation(const PatternSnapshot &pattern,
+                     const ulong ticket,
+                     const string annotationStatus,
+                     const double entryBarLowAtP4,
+                     const double barHighAtP5Confirmation)
+  {
+   PrintFormat("ACTIVATE_P56 symbol=%s ticket=%I64u annotation=%s "
+               "P4=(%s,%.5f) P5=(%s,%.5f) P6=(%s,%.5f) "
+               "entry_bar_low_at_p4=%.5f bar_high_at_p5=%.5f soft_loss=%.5f profit=%.5f",
+               pattern.symbol,
+               ticket,
+               annotationStatus,
+               FormatTimeMsc(pattern.pointTimesMsc[4]),
+               pattern.pointPrices[4],
+               FormatTimeMsc(pattern.pointTimesMsc[5]),
+               pattern.pointPrices[5],
+               FormatTimeMsc(pattern.pointTimesMsc[6]),
+               pattern.pointPrices[6],
+               entryBarLowAtP4,
+               barHighAtP5Confirmation,
+               pattern.softLossPrice,
+               pattern.profitPrice);
   }
 
 string FormatTime(const datetime value)
@@ -2131,4 +2378,15 @@ string FormatTime(const datetime value)
    if(value == 0)
       return("n/a");
    return(TimeToString(value, TIME_DATE | TIME_MINUTES));
+  }
+
+string FormatTimeMsc(const long value)
+  {
+   if(value <= 0)
+      return("n/a");
+   const datetime secondsPart = (datetime)(value / 1000);
+   const int millisPart = (int)(value % 1000);
+   return(StringFormat("%s.%03d",
+                       TimeToString(secondsPart, TIME_DATE | TIME_SECONDS),
+                       millisPart));
   }
