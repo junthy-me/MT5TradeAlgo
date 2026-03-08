@@ -24,11 +24,19 @@ TBD - created by archiving change add-mt5-kline-pattern-strategy. Update Purpose
 
 #### Scenario: 使用最大跨度默认值
 - **WHEN** 操作人员未显式覆盖 `InpAdjustPointMaxSpanKNumber`
-- **THEN** 策略使用默认值 `30`
+- **THEN** 策略使用默认值 `35`
 
 #### Scenario: 使用前置下跌搜索窗口默认值
 - **WHEN** 操作人员未显式覆盖 `InpPreCondPriorDeclineLookbackBars`
-- **THEN** 策略使用默认值 `20`
+- **THEN** 策略使用默认值 `30`
+
+#### Scenario: 使用 CondA 下限默认值
+- **WHEN** 操作人员未显式覆盖 `InpCondAXMin`
+- **THEN** 策略使用默认值 `0.5`
+
+#### Scenario: 使用 CondA 上限默认值
+- **WHEN** 操作人员未显式覆盖 `InpCondAXMax`
+- **THEN** 策略使用默认值 `2.0`
 
 #### Scenario: 使用前置下跌最小结构比例默认值
 - **WHEN** 操作人员未显式覆盖 `InpPreCondPriorDeclineMinDropRatioOfStructure`
@@ -40,15 +48,15 @@ TBD - created by archiving change add-mt5-kline-pattern-strategy. Update Purpose
 
 #### Scenario: 使用 a 的最小空间默认值
 - **WHEN** 操作人员未显式覆盖 `InpP1P2AValueSpaceMinPriceLimit`
-- **THEN** 策略使用默认值 `5`
+- **THEN** 策略使用默认值 `0`
 
 #### Scenario: 使用 a 的最小时间默认值
 - **WHEN** 操作人员未显式覆盖 `InpP1P2AValueTimeMinKNumberLimit`
-- **THEN** 策略使用默认值 `3`
+- **THEN** 策略使用默认值 `1`
 
 #### Scenario: 使用 bSum 相对 a 的最小比例默认值
 - **WHEN** 操作人员未显式覆盖 `InpBSumValueMinRatioOfAValue`
-- **THEN** 策略使用默认值 `2`
+- **THEN** 策略使用默认值 `1.5`
 
 #### Scenario: 使用 bSum 相对 a 的最大比例默认值
 - **WHEN** 操作人员未显式覆盖 `InpBSumValueMaxRatioOfAValue`
