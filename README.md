@@ -85,8 +85,9 @@
   - 下限：`b1 + b2 >= InpBSumValueMinRatioOfAValue * a`
   - 上限：`b1 + b2 <= InpBSumValueMaxRatioOfAValue * a`
 - `Pre0` 前置下跌先决条件：
+  - 只有在 `InpPreCondEnable = true` 时才启用
   - 在 `P0` 之前最近 `InpPreCondPriorDeclineLookbackBars` 根 K 线内，必须存在一个 `Pre0`
-  - `Pre0 -> P0` 的跌幅要大于 `InpPreCondPriorDeclineMinDropRatioOfStructure * (a + b1 + b2)`
+  - `Pre0 -> P0` 的跌幅要大于 `InpPreCondPriorDeclineMinDropRatioOfStructure * (a + b1)`
   - `Pre0` 与 `P0` 之间的中间 K 线数量必须 `>= InpPreCondPriorDeclineMinBarsBetweenPre0AndP0`
   - `Pre0` 必须达到 `Pre0 -> P0` 整段最高点，`P0` 必须达到整段最低点；如果段内有并列 high/low，端点只要达到该极值就算通过
 
@@ -104,6 +105,7 @@
 - `P4 < P3`
 - `CondB`：`c / (a + b1 + b2) >= InpP3P4DropMinRatioOfStructure`
 - `CondC`：`t4 < InpCondCZ * (t1 + t2 + t3)`
+- `P3` 必须达到 `P3 -> P4` 整段最高点；如果段内出现与 `P3` 相同的并列高点，仍算通过
 
 如果同一时刻有多个候选骨架都能触发，代码优先选择：
 
@@ -153,10 +155,11 @@
 
 ### 弱止损
 
-弱止损不是开仓就有，而是开仓后继续从 `P4` 之后的已收盘 K 线中寻找合格的 `P5/P6` 组合：
+弱止损不是开仓就有，而是开仓后继续基于该持仓之后的 tick 顺序追踪 `P5/P6`：
 
-- `P5`：后续最低点
-- `P6`：`P5` 之后的后续最高点
+- `P5`：只允许从 `tP4` 之后的后续 tick 中确认
+- `P6`：只允许从 `tP5` 之后的后续 tick 中确认
+- `P4`、`P5`、`P6` 可以落在同一根 K 线上，也可以落在不同 K 线上，但必须满足严格顺序 `tP4 < tP5 < tP6`
 
 找到后计算：
 
@@ -172,9 +175,11 @@
 - `softLossPrice = InpSoftLossC * selectedP5`
 - `profitPrice = selectedP5 + InpP5AnchoredProfitC * (a + b1 + b2)`
 
-默认 `InpP5AnchoredProfitC = 0.7`。
+默认 `InpP5AnchoredProfitC = 1.0`。
 
 一旦首次激活完成，这两个价位会被冻结，后续即使再出现新的 `P5/P6` 组合，也不会继续改写。
+
+同一根 K 线里如果在 `P4` 之前已经出现过更早的低点，或者在 `P5` 之前已经出现过更早的高点，代码也不会直接把这两个 bar 级极值误当成 `P5/P6`；只有在 tick 顺序上能证明发生在 `P4` 之后或 `P5` 之后的事件才会被接受。
 
 如果实时 `bid <= softLossPrice`，则按 `soft_stop` 平仓；如果实时 `bid >=` 当前已激活的 `profitPrice`，则按 `profit_target` 平仓。
 
@@ -194,42 +199,43 @@
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
 | `InpSymbols` | `"XAUUSD"` | 要扫描的品种列表，分号分隔 | `OnTimer()` 逐个轮询 |
-| `InpTF` | `PERIOD_M15` | 形态识别周期 | 所有 K 线和时间跨度都基于该周期 |
+| `InpTF` | `PERIOD_M10` | 形态识别周期 | 所有 K 线和时间跨度都基于该周期 |
 | `InpTimerMillSec` | `100` | 定时器轮询间隔，毫秒 | 控制扫描频率 |
 | `InpMagic` | `9527001` | EA 魔术号 | 用来识别本 EA 的持仓 |
 | `InpComment` | `"P4PatternStrategy"` | 订单备注前缀 | 用于识别和日志追踪 |
 | `InpFixedLots` | `0.05` | 固定下单手数 | 直接用于 `trade.Buy()` |
 | `InpMaxPositionsPerSymbol` | `1` | 单品种最大并行持仓数 | 超限时阻止开仓 |
 | `InpSlippagePoints` | `20` | 允许的价格偏差点数 | 用于交易请求的成交偏差控制 |
-| `InpProfitObservationBars` | `30` | 止盈后观察窗口 bar 数 | 观察期内阻止新开仓 |
-| `InpStopObservationBars` | `30` | 止损后观察窗口 bar 数 | `hard_stop` 或 `soft_stop` 后观察期内阻止新开仓 |
+| `InpProfitObservationBars` | `10` | 止盈后观察窗口 bar 数 | 观察期内阻止新开仓 |
+| `InpStopObservationBars` | `10` | 止损后观察窗口 bar 数 | `hard_stop` 或 `soft_stop` 后观察期内阻止新开仓 |
 | `InpLookbackBars` | `300` | 回看已收盘 K 线数量 | 限制历史骨架搜索范围 |
-| `InpAdjustPointMinSpanKNumber` | `5` | 相邻点之间最少中间 K 线数 | 限制 `P0-P4` 各段跨度下限 |
+| `InpAdjustPointMinSpanKNumber` | `3` | 相邻点之间最少中间 K 线数 | 限制 `P0-P4` 各段跨度下限 |
 | `InpAdjustPointMaxSpanKNumber` | `35` | 相邻点之间最多中间 K 线数 | 限制 `P0-P4` 各段跨度上限 |
 
 ### 历史骨架过滤参数
 
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
-| `InpCondAXMin` | `0.5` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
-| `InpCondAXMax` | `2.0` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
+| `InpCondAXMin` | `0.75` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
+| `InpCondAXMax` | `1.25` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
 | `InpP1P2AValueSpaceMinPriceLimit` | `0.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
 | `InpP1P2AValueTimeMinKNumberLimit` | `1` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
-| `InpBSumValueMinRatioOfAValue` | `1.5` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
-| `InpBSumValueMaxRatioOfAValue` | `5.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
+| `InpBSumValueMinRatioOfAValue` | `2.0` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
+| `InpBSumValueMaxRatioOfAValue` | `10.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
+| `InpPreCondEnable` | `false` | 是否启用 `Pre0` 前置下跌条件 | 关闭时跳过 `Pre0` 搜索与过滤，也不画 `Pre0` 标注 |
 | `InpPreCondPriorDeclineLookbackBars` | `30` | `Pre0` 前置下跌回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
-| `InpPreCondPriorDeclineMinDropRatioOfStructure` | `0.7` | `Pre0->P0` 最小跌幅系数 | 要求跌幅 `> 该值 * (a+b1+b2)` |
+| `InpPreCondPriorDeclineMinDropRatioOfStructure` | `0.45` | `Pre0->P0` 最小跌幅系数 | 要求跌幅 `> 该值 * (a+b1)` |
 | `InpPreCondPriorDeclineMinBarsBetweenPre0AndP0` | `0` | `Pre0` 与 `P0` 最少间隔 bar 数 | 约束前置下跌与骨架之间的距离 |
 
 ### 实时触发与出场参数
 
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
-| `InpP3P4DropMinRatioOfStructure` | `0.4` | `CondB` 阈值 | 要求 `c / (a+b1+b2) >= 该值` |
+| `InpP3P4DropMinRatioOfStructure` | `0.44` | `CondB` 阈值 | 要求 `c / (a+b1+b2) >= 该值` |
 | `InpCondCZ` | `1.0` | `CondC` 系数 | 要求 `t4 < 该值 * (t1+t2+t3)` |
-| `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.65` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
+| `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.55` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
 | `InpSoftLossC` | `1.0` | 弱止损价系数 | `softLossPrice = 该值 * selectedP5` |
-| `InpP5AnchoredProfitC` | `0.7` | 唯一止盈系数 | 首次 `P5/P6` 激活后，`profitPrice = selectedP5 + 该值 * (a+b1+b2)` |
+| `InpP5AnchoredProfitC` | `1.0` | 唯一止盈系数 | 首次 `P5/P6` 激活后，`profitPrice = selectedP5 + 该值 * (a+b1+b2)` |
 | `InpEnableExactSearchCompare` | `false` | 调试开关 | 打开后会对比缓存搜索和精确搜索结果，仅用于诊断 |
 
 ## 当前实现与最初 PRD 的主要差异
@@ -254,11 +260,12 @@
 策略默认只突出成功买点日志，重点字段包括：
 
 - 成功买点日志 `ENTRY_P4`：默认只保留这一条核心摘要，输出 `symbol`、`ticket`、`p4_bar`、成交价、`hard_loss`、图形标注状态，以及本次买入实际使用的 `P0-P4` 时间和价格
+- 弱止损首次激活日志 `ACTIVATE_P56`：输出 `P4/P5/P6` 的 tick 级时间和价格，以及 `entry_bar_low_at_p4`、`bar_high_at_p5` 两个诊断字段，用来确认同 bar 场景下没有把更早发生的 bar 级低点/高点误判成 `P5/P6`
 - `annotation=drawn`：表示策略已在一个已打开且匹配 `symbol + InpTF` 的图表上画出该次买点的模式对象；如果后续首次出现合格 `P5/P6`，同一组对象会继续补画
 - `annotation=no_matching_chart`：表示本次买入成功，但当前没有打开匹配的图表，所以没有绘图
 - `annotation=draw_failed`：表示交易成功，但图形对象创建失败；不会影响持仓管理
 
-默认不再打印常规阻止日志、弱止损首次激活日志和例行 `EXIT` 摘要，因此 Experts 输出会明显更短，更适合直接盯买点。
+默认不再打印常规阻止日志和例行 `EXIT` 摘要，因此 Experts 输出会明显更短，更适合直接盯买点和 `P5/P6` 激活。
 
 ## 图上怎么看模式
 
@@ -269,10 +276,10 @@
 
 满足后，策略会在成功买入时于该图上绘制：
 
-- `Pre0/P0/P1/P2/P3/P4` 点位标记和相邻连线
+- 启用并匹配到前置条件时，显示 `Pre0`；否则仍正常显示 `P0/P1/P2/P3/P4` 点位标记和相邻连线
 - `P4` 买点高亮箭头
 - 强止损水平线
-- `Pre0-P0` 下跌值、`b1`、`a`、`b2`、`c` 数值标注
+- `Pre0-P0` 下跌值、`b1`、`a`、`b2`、`c` 数值标注；其中 `Pre0-P0` 只在启用且匹配到 `Pre0` 时显示
 
 如果后续该持仓首次形成合格 `P5/P6`，策略会在同一组对象里继续补充：
 
