@@ -8,8 +8,8 @@
 #define PATTERN_SEGMENT_COUNT 6
 #define HISTORY_CANDIDATE_GROWTH_STEP 512
 
-input string InpSymbols = "AAPL;MSFT;NVDA";
-input ENUM_TIMEFRAMES InpTF = PERIOD_M5;
+input string InpSymbols = "XAUUSD";
+input ENUM_TIMEFRAMES InpTF = PERIOD_M15;
 input int InpTimerMillSec = 100;
 input long InpMagic = 9527001;
 input string InpComment = "P4PatternStrategy";
@@ -21,14 +21,14 @@ input int InpProfitObservationBars = 30;
 input int InpStopObservationBars = 30;
 input int InpLookbackBars = 300;
 input int InpAdjustPointMinSpanKNumber = 5;
-input int InpAdjustPointMaxSpanKNumber = 30;
+input int InpAdjustPointMaxSpanKNumber = 35;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
 input double InpP3P4DropMinRatioOfStructure = 0.4;
 input double InpCondCZ = 1.0;
-input double InpP1P2AValueSpaceMinPriceLimit = 5.0;
-input int InpP1P2AValueTimeMinKNumberLimit = 3;
+input double InpP1P2AValueSpaceMinPriceLimit = 0.0;
+input int InpP1P2AValueTimeMinKNumberLimit = 1;
 input double InpBSumValueMinRatioOfAValue = 2.0;
 input double InpBSumValueMaxRatioOfAValue = 5.0;
 input int InpPreCondPriorDeclineLookbackBars = 20;
@@ -938,6 +938,75 @@ double GetRoleHigh(const MqlRates &rate)
    return(rate.high);
   }
 
+bool SegmentEndpointsReachExtrema(const string symbol,
+                                  MqlRates &rates[],
+                                  const int startIndex,
+                                  const int endIndex,
+                                  const bool startUsesHigh,
+                                  const bool endUsesHigh)
+  {
+   const int total = ArraySize(rates);
+   if(startIndex < 0 || endIndex < startIndex || endIndex >= total)
+      return(false);
+
+   double segmentLow = NormalizePrice(symbol, GetRoleLow(rates[startIndex]));
+   double segmentHigh = NormalizePrice(symbol, GetRoleHigh(rates[startIndex]));
+   for(int i = startIndex + 1; i <= endIndex; ++i)
+     {
+      const double barLow = NormalizePrice(symbol, GetRoleLow(rates[i]));
+      const double barHigh = NormalizePrice(symbol, GetRoleHigh(rates[i]));
+      if(barLow < segmentLow)
+         segmentLow = barLow;
+      if(barHigh > segmentHigh)
+         segmentHigh = barHigh;
+     }
+
+   const double startValue = NormalizePrice(symbol,
+                                            startUsesHigh ? GetRoleHigh(rates[startIndex]) : GetRoleLow(rates[startIndex]));
+   const double endValue = NormalizePrice(symbol,
+                                          endUsesHigh ? GetRoleHigh(rates[endIndex]) : GetRoleLow(rates[endIndex]));
+
+   if(startUsesHigh)
+     {
+      if(startValue < segmentHigh)
+         return(false);
+     }
+   else
+     {
+      if(startValue > segmentLow)
+         return(false);
+     }
+
+   if(endUsesHigh)
+     {
+      if(endValue < segmentHigh)
+         return(false);
+     }
+   else
+     {
+      if(endValue > segmentLow)
+         return(false);
+     }
+
+   return(true);
+  }
+
+bool SegmentHasAscendingEndpointExtrema(const string symbol,
+                                        MqlRates &rates[],
+                                        const int startIndex,
+                                        const int endIndex)
+  {
+   return(SegmentEndpointsReachExtrema(symbol, rates, startIndex, endIndex, false, true));
+  }
+
+bool SegmentHasDescendingEndpointExtrema(const string symbol,
+                                         MqlRates &rates[],
+                                         const int startIndex,
+                                         const int endIndex)
+  {
+   return(SegmentEndpointsReachExtrema(symbol, rates, startIndex, endIndex, true, false));
+  }
+
 void ResetHistoryCache(SymbolRuntimeState &state)
   {
    state.historyCacheReady = false;
@@ -1067,6 +1136,9 @@ bool EvaluatePriorDeclinePrecondition(MqlRates &rates[], PatternSnapshot &patter
       if(drop <= minRequiredDrop)
          continue;
 
+      if(!SegmentHasDescendingEndpointExtrema(pattern.symbol, rates, i, p0Index))
+         continue;
+
       if(bestIndex < 0 || pre0Price > bestPrice || (pre0Price == bestPrice && i > bestIndex))
         {
          bestIndex = i;
@@ -1117,6 +1189,11 @@ bool BuildHistoricalBackbone(const string symbol,
       return(false);
 
    if(b1 <= 0.0 || a <= 0.0 || b2 <= 0.0)
+      return(false);
+
+   if(!SegmentHasAscendingEndpointExtrema(symbol, rates, i0, i1) ||
+      !SegmentHasDescendingEndpointExtrema(symbol, rates, i1, i2) ||
+      !SegmentHasAscendingEndpointExtrema(symbol, rates, i2, i3))
       return(false);
 
    ResetPattern(pattern);

@@ -68,6 +68,12 @@
 - `P2 < P1`
 - `P3 > P1`
 
+除了这些点位关系，历史骨架现在还必须满足“端点就是该段极值”的线段约束，且默认允许并列极值：
+
+- `P0 -> P1`：`P0` 必须达到整段最低点，`P1` 必须达到整段最高点
+- `P1 -> P2`：`P1` 必须达到整段最高点，`P2` 必须达到整段最低点
+- `P2 -> P3`：`P2` 必须达到整段最低点，`P3` 必须达到整段最高点
+
 ### 2. 再对历史骨架做结构过滤
 
 历史骨架不是只要长得像就可以，当前代码会继续检查这些条件：
@@ -82,6 +88,7 @@
   - 在 `P0` 之前最近 `InpPreCondPriorDeclineLookbackBars` 根 K 线内，必须存在一个 `Pre0`
   - `Pre0 -> P0` 的跌幅要大于 `InpPreCondPriorDeclineMinDropRatioOfStructure * (a + b1 + b2)`
   - `Pre0` 与 `P0` 之间的中间 K 线数量必须 `>= InpPreCondPriorDeclineMinBarsBetweenPre0AndP0`
+  - `Pre0` 必须达到 `Pre0 -> P0` 整段最高点，`P0` 必须达到整段最低点；如果段内有并列 high/low，端点只要达到该极值就算通过
 
 只有通过这些检查的 `P0-P3`，才会进入缓存，等待实时 `P4` 触发。
 
@@ -186,8 +193,8 @@
 
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
-| `InpSymbols` | `"AAPL;MSFT;NVDA"` | 要扫描的品种列表，分号分隔 | `OnTimer()` 逐个轮询 |
-| `InpTF` | `PERIOD_M5` | 形态识别周期 | 所有 K 线和时间跨度都基于该周期 |
+| `InpSymbols` | `"XAUUSD"` | 要扫描的品种列表，分号分隔 | `OnTimer()` 逐个轮询 |
+| `InpTF` | `PERIOD_M15` | 形态识别周期 | 所有 K 线和时间跨度都基于该周期 |
 | `InpTimerMillSec` | `100` | 定时器轮询间隔，毫秒 | 控制扫描频率 |
 | `InpMagic` | `9527001` | EA 魔术号 | 用来识别本 EA 的持仓 |
 | `InpComment` | `"P4PatternStrategy"` | 订单备注前缀 | 用于识别和日志追踪 |
@@ -198,7 +205,7 @@
 | `InpStopObservationBars` | `30` | 止损后观察窗口 bar 数 | `hard_stop` 或 `soft_stop` 后观察期内阻止新开仓 |
 | `InpLookbackBars` | `300` | 回看已收盘 K 线数量 | 限制历史骨架搜索范围 |
 | `InpAdjustPointMinSpanKNumber` | `5` | 相邻点之间最少中间 K 线数 | 限制 `P0-P4` 各段跨度下限 |
-| `InpAdjustPointMaxSpanKNumber` | `30` | 相邻点之间最多中间 K 线数 | 限制 `P0-P4` 各段跨度上限 |
+| `InpAdjustPointMaxSpanKNumber` | `35` | 相邻点之间最多中间 K 线数 | 限制 `P0-P4` 各段跨度上限 |
 
 ### 历史骨架过滤参数
 
@@ -206,8 +213,8 @@
 | --- | --- | --- | --- |
 | `InpCondAXMin` | `0.75` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
 | `InpCondAXMax` | `1.25` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
-| `InpP1P2AValueSpaceMinPriceLimit` | `5.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
-| `InpP1P2AValueTimeMinKNumberLimit` | `3` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
+| `InpP1P2AValueSpaceMinPriceLimit` | `0.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
+| `InpP1P2AValueTimeMinKNumberLimit` | `1` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
 | `InpBSumValueMinRatioOfAValue` | `2.0` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
 | `InpBSumValueMaxRatioOfAValue` | `5.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
 | `InpPreCondPriorDeclineLookbackBars` | `20` | `Pre0` 前置下跌回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
