@@ -19,15 +19,13 @@ TERMINAL_LOG_DIR = MT5_ROOT / "logs"
 TESTER_DIR = MT5_ROOT / "Tester"
 
 START_RE = re.compile(
-    r"testing of Experts\\P4Entry0227\.ex5 from "
+    r"testing of Experts\\P4PatternStrategy\.ex5 from "
     r"(?P<from_date>\d{4}\.\d{2}\.\d{2} 00:00) to "
     r"(?P<to_date>\d{4}\.\d{2}\.\d{2} 00:00) started with inputs:"
 )
-FINISH_RE = re.compile(
-    r"Tester\ttest Experts\\P4Entry0227\.ex5 on XAUUSD,M15 thread finished"
-)
+FINISH_RE = re.compile(r"XAUUSD,M15: .*Test passed in")
 INPUT_RE = re.compile(r"\tTester\t  ([A-Za-z0-9_]+)=([^\r\n]+)")
-ENTRY_RE = re.compile(r"ENTRY symbol=XAUUSD ticket=(\d+).*?executed=([0-9.]+)")
+ENTRY_RE = re.compile(r"ENTRY_P4 symbol=XAUUSD ticket=(\d+).*?executed=([0-9.]+).*?direction=(long|short)")
 EXIT_RE = re.compile(r"EXIT symbol=XAUUSD ticket=(\d+) reason=([a-z_]+).*?executed=([0-9.]+)")
 
 
@@ -47,6 +45,7 @@ class RunResult:
     from_date: str
     to_date: str
     inputs: dict[str, str]
+    entry_directions: dict[int, str]
     trades: list[Trade]
     raw_block: str
 
@@ -96,10 +95,15 @@ class RunResult:
         return self.net_points * self.lot_size * 100.0
 
     def to_dict(self) -> dict[str, object]:
+        long_entries = sum(1 for direction in self.entry_directions.values() if direction == "long")
+        short_entries = sum(1 for direction in self.entry_directions.values() if direction == "short")
         return {
             "stem": self.stem,
             "from_date": self.from_date,
             "to_date": self.to_date,
+            "entry_count": len(self.entry_directions),
+            "long_entries": long_entries,
+            "short_entries": short_entries,
             "closed_trades": self.closed_trades,
             "net_points": round(self.net_points, 5),
             "approx_profit_usd": round(self.approx_profit_usd, 2),
@@ -184,7 +188,8 @@ def parse_run_from_log(
 
     block = text[start_match.start():finish_match.start()]
     inputs = dict(INPUT_RE.findall(block))
-    entries = {int(ticket): float(price) for ticket, price in ENTRY_RE.findall(block)}
+    entries = {int(ticket): float(price) for ticket, price, _direction in ENTRY_RE.findall(block)}
+    entry_directions = {int(ticket): direction for ticket, _price, direction in ENTRY_RE.findall(block)}
     trades: list[Trade] = []
     for ticket_s, reason, exit_price_s in EXIT_RE.findall(block):
         ticket = int(ticket_s)
@@ -208,6 +213,7 @@ def parse_run_from_log(
         from_date=from_date,
         to_date=to_date,
         inputs=inputs,
+        entry_directions=entry_directions,
         trades=trades,
         raw_block=block,
     )
