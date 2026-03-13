@@ -66,10 +66,13 @@
 - 多头：`P1 > P0`、`P2 > P0`、`P2 < P1`、`P3 > P1`
 - 空头：`P1 < P0`、`P2 < P0`、`P2 > P1`、`P3 < P1`
 
-除了这些点位关系，历史骨架现在还必须满足“端点就是该段极值”的线段约束，且默认允许并列极值：
+除了这些点位关系，历史骨架现在还必须满足“端点就是该段极值”的线段约束，且默认允许并列极值。这些约束由 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 控制，默认值为 `"true,true,true,true,true"`：
 
-- 多头：`P0 -> P1`、`P1 -> P2`、`P2 -> P3` 依次要求 `low/high`、`high/low`、`low/high`
-- 空头：同三段按镜像要求 `high/low`、`low/high`、`high/low`
+- `Pre0P0`：控制 `Pre0 -> P0` 段是否要求两个端点达到该段极值
+- `P0P1`、`P1P2`、`P2P3`：分别控制对应历史骨架段是否要求两个端点达到该段极值
+- `P3P4`：只控制 `P3` 是否达到 `P3 -> P4` 段极值，不要求 `P4` 成为该段另一端极值
+- 多头启用时：`P0 -> P1`、`P1 -> P2`、`P2 -> P3` 依次要求 `low/high`、`high/low`、`low/high`
+- 空头启用时：同三段按镜像要求 `high/low`、`low/high`、`high/low`
 
 ### 2. 再对历史骨架做结构过滤
 
@@ -86,7 +89,7 @@
   - 在 `P0` 之前最近 `InpPreCondPriorMoveLookbackBars` 根 K 线内，必须存在一个 `Pre0`
   - `Pre0 -> P0` 的方向性 move 要大于 `InpPreCondPriorMoveMinRatioOfStructure * (a + b1)`
   - `Pre0` 与 `P0` 之间的中间 K 线数量必须 `>= InpPreCondPriorMoveMinBarsBetweenPre0AndP0`
-  - 多头要求 `Pre0` 达到该段最高点、`P0` 达到该段最低点；空头按镜像要求 `Pre0` 达到该段最低点、`P0` 达到该段最高点；如果段内有并列极值，端点只要达到该极值就算通过
+  - 只有当 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 的 `Pre0P0` 位置为 `true` 时，才要求多头下 `Pre0` 达到该段最高点、`P0` 达到该段最低点；空头按镜像要求 `Pre0` 达到该段最低点、`P0` 达到该段最高点；如果段内有并列极值，端点只要达到该极值就算通过
 
 只有通过这些检查的 `P0-P3`，才会进入缓存，等待实时 `P4` 触发。
 
@@ -101,8 +104,8 @@
 
 - `CondB`：`c / (a + b1 + b2) >= InpP3P4MoveMinRatioOfStructure`
 - `CondC`：`t4 < InpCondCZ * (t1 + t2 + t3)`
-- 多头要求 `P4 < P3`，且 `P3` 必须达到 `P3 -> P4` 整段最高点
-- 空头要求 `P4 > P3`，且 `P3` 必须达到 `P3 -> P4` 整段最低点
+- 多头要求 `P4 < P3`，且只有在 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 的 `P3P4` 位置为 `true` 时，才要求 `P3` 达到 `P3 -> P4` 整段最高点
+- 空头要求 `P4 > P3`，且只有在 `P3P4=true` 时，才要求 `P3` 达到 `P3 -> P4` 整段最低点
 - 如果段内出现与 `P3` 相同的并列极值，仍算通过
 
 如果同一时刻有多个候选骨架都能触发，代码优先选择：
@@ -238,6 +241,7 @@
 | `InpPreCondPriorMoveLookbackBars` | `30` | `Pre0` 前置 move 回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
 | `InpPreCondPriorMoveMinRatioOfStructure` | `0.45` | `Pre0->P0` 最小方向性 move 系数 | 要求方向性 move `> 该值 * (a+b1)` |
 | `InpPreCondPriorMoveMinBarsBetweenPre0AndP0` | `0` | `Pre0` 与 `P0` 最少间隔 bar 数 | 约束前置 move 与骨架之间的距离 |
+| `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` | `"true,true,true,true,true"` | 相邻段整段极值开关 | 顺序固定为 `Pre0P0/P0P1/P1P2/P2P3/P3P4`；前四位控制对应线段两个端点，`P3P4` 只控制 `P3` |
 
 ### 实时触发与出场参数
 

@@ -8,6 +8,7 @@
 #define PATTERN_SEGMENT_COUNT 6
 #define HISTORY_CANDIDATE_GROWTH_STEP 512
 #define PRE0_POINT_INDEX -1
+#define SWING_EXTREMA_SEGMENT_CONFIG_COUNT 5
 
 enum ENUM_TRADE_DIRECTION_MODE
   {
@@ -20,6 +21,15 @@ enum PatternDirection
   {
    PATTERN_DIRECTION_LONG = 1,
    PATTERN_DIRECTION_SHORT = -1
+  };
+
+enum SwingExtremaSegmentIndex
+  {
+   SWING_EXTREMA_SEGMENT_PRE0P0 = 0,
+   SWING_EXTREMA_SEGMENT_P0P1 = 1,
+   SWING_EXTREMA_SEGMENT_P1P2 = 2,
+   SWING_EXTREMA_SEGMENT_P2P3 = 3,
+   SWING_EXTREMA_SEGMENT_P3P4 = 4
   };
 
 input string InpSymbols = "XAUUSD";
@@ -50,6 +60,7 @@ input bool InpPreCondEnable = false;
 input int InpPreCondPriorMoveLookbackBars = 30;
 input double InpPreCondPriorMoveMinRatioOfStructure = 0.45;
 input int InpPreCondPriorMoveMinBarsBetweenPre0AndP0 = 0;
+input string InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4 = "true,true,true,true,true";
 
 input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.55;
 input double InpSoftLossC = 1.0;
@@ -172,10 +183,14 @@ CTrade trade;
 string g_symbols[];
 SymbolRuntimeState g_symbolStates[];
 ManagedPositionState g_positionStates[];
+bool g_requiredSwingExtremaSegments[SWING_EXTREMA_SEGMENT_CONFIG_COUNT];
 
 int OnInit()
   {
    if(!ValidateInputs())
+      return(INIT_PARAMETERS_INCORRECT);
+
+   if(!ParseRequiredSwingExtremaSegments())
       return(INIT_PARAMETERS_INCORRECT);
 
    if(!ParseSymbols())
@@ -194,6 +209,7 @@ int OnInit()
                InpSymbols,
                EnumToString(InpTF),
                InpTimerMillSec);
+   PrintFormat("Resolved swing extrema segments. %s", FormatSwingExtremaSegmentFlags());
    return(INIT_SUCCEEDED);
   }
 
@@ -361,6 +377,95 @@ bool ParseSymbols()
      {
       Print("No valid symbols were parsed from InpSymbols.");
       return(false);
+     }
+
+   return(true);
+  }
+
+string BoolToString(const bool value)
+  {
+   return(value ? "true" : "false");
+  }
+
+string SwingExtremaSegmentName(const int index)
+  {
+   switch(index)
+     {
+      case SWING_EXTREMA_SEGMENT_PRE0P0:
+         return("Pre0P0");
+      case SWING_EXTREMA_SEGMENT_P0P1:
+         return("P0P1");
+      case SWING_EXTREMA_SEGMENT_P1P2:
+         return("P1P2");
+      case SWING_EXTREMA_SEGMENT_P2P3:
+         return("P2P3");
+      case SWING_EXTREMA_SEGMENT_P3P4:
+         return("P3P4");
+      default:
+         return("unknown");
+     }
+  }
+
+bool IsSwingExtremaSegmentEnabled(const SwingExtremaSegmentIndex index)
+  {
+   return(g_requiredSwingExtremaSegments[(int)index]);
+  }
+
+string FormatSwingExtremaSegmentFlags()
+  {
+   return(StringFormat("Pre0P0=%s,P0P1=%s,P1P2=%s,P2P3=%s,P3P4=%s",
+                       BoolToString(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_PRE0P0)),
+                       BoolToString(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P0P1)),
+                       BoolToString(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P1P2)),
+                       BoolToString(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P2P3)),
+                       BoolToString(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P3P4))));
+  }
+
+bool ParseBooleanToken(string token, bool &value)
+  {
+   StringTrimLeft(token);
+   StringTrimRight(token);
+
+   if(StringCompare(token, "true", false) == 0)
+     {
+      value = true;
+      return(true);
+     }
+
+   if(StringCompare(token, "false", false) == 0)
+     {
+      value = false;
+      return(true);
+     }
+
+   return(false);
+  }
+
+bool ParseRequiredSwingExtremaSegments()
+  {
+   string rawSegments[];
+   const int parts = StringSplit(InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4, ',', rawSegments);
+   if(parts != SWING_EXTREMA_SEGMENT_CONFIG_COUNT)
+     {
+      PrintFormat("Invalid InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4: expected %d comma-separated booleans, got %d. raw=%s",
+                  SWING_EXTREMA_SEGMENT_CONFIG_COUNT,
+                  parts,
+                  InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4);
+      return(false);
+     }
+
+   for(int i = 0; i < SWING_EXTREMA_SEGMENT_CONFIG_COUNT; ++i)
+     {
+      bool parsedValue = false;
+      if(!ParseBooleanToken(rawSegments[i], parsedValue))
+        {
+         PrintFormat("Invalid swing extrema segment value. segment=%s raw=%s expected=true|false",
+                     SwingExtremaSegmentName(i),
+                     rawSegments[i]);
+         return(false);
+        }
+
+      g_requiredSwingExtremaSegments[i] = parsedValue;
      }
 
    return(true);
@@ -1323,7 +1428,8 @@ bool EvaluatePriorMovePrecondition(MqlRates &rates[], PatternSnapshot &pattern)
       if(move <= minRequiredMove)
          continue;
 
-      if(!SegmentHasDirectionalEndpointExtrema(pattern.symbol, rates, pattern.direction, i, p0Index, PRE0_POINT_INDEX, 0))
+      if(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_PRE0P0) &&
+         !SegmentHasDirectionalEndpointExtrema(pattern.symbol, rates, pattern.direction, i, p0Index, PRE0_POINT_INDEX, 0))
          continue;
 
       const bool isPreferred = (bestIndex < 0 ||
@@ -1385,9 +1491,12 @@ bool BuildHistoricalBackbone(const string symbol,
    if(b1 <= 0.0 || a <= 0.0 || b2 <= 0.0)
       return(false);
 
-   if(!SegmentHasDirectionalEndpointExtrema(symbol, rates, direction, i0, i1, 0, 1) ||
-      !SegmentHasDirectionalEndpointExtrema(symbol, rates, direction, i1, i2, 1, 2) ||
-      !SegmentHasDirectionalEndpointExtrema(symbol, rates, direction, i2, i3, 2, 3))
+   if((IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P0P1) &&
+       !SegmentHasDirectionalEndpointExtrema(symbol, rates, direction, i0, i1, 0, 1)) ||
+      (IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P1P2) &&
+       !SegmentHasDirectionalEndpointExtrema(symbol, rates, direction, i1, i2, 1, 2)) ||
+      (IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P2P3) &&
+       !SegmentHasDirectionalEndpointExtrema(symbol, rates, direction, i2, i3, 2, 3)))
       return(false);
 
    ResetPattern(pattern);
@@ -1599,44 +1708,47 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
    pattern.condC = pattern.t[3] < (InpCondCZ * (pattern.t[0] + pattern.t[1] + pattern.t[2]));
    pattern.condD = true;
 
-   double p34SegmentExtrema = 0.0;
-   bool p34HasAdditionalTieExtrema = false;
-   if(!GetP3P4SegmentExtremaStats(pattern.symbol,
-                                  pattern.direction,
-                                  pattern.pointTimes[3],
-                                  pattern.pointPrices[3],
-                                  currentBarTime,
-                                  p34SegmentExtrema,
-                                  p34HasAdditionalTieExtrema))
+   if(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P3P4))
      {
-      ResetPattern(pattern);
-      return(false);
-     }
+      double p34SegmentExtrema = 0.0;
+      bool p34HasAdditionalTieExtrema = false;
+      if(!GetP3P4SegmentExtremaStats(pattern.symbol,
+                                     pattern.direction,
+                                     pattern.pointTimes[3],
+                                     pattern.pointPrices[3],
+                                     currentBarTime,
+                                     p34SegmentExtrema,
+                                     p34HasAdditionalTieExtrema))
+        {
+         ResetPattern(pattern);
+         return(false);
+        }
 
-   const bool extremaRejected = (pattern.direction == PATTERN_DIRECTION_LONG && p34SegmentExtrema > pattern.pointPrices[3]) ||
-                                (pattern.direction == PATTERN_DIRECTION_SHORT && p34SegmentExtrema < pattern.pointPrices[3]);
-   if(extremaRejected)
-     {
-      if(InpEnableExactSearchCompare)
-         PrintFormat("P34_EXTREMA_REJECT symbol=%s direction=%s p3=(%s,%.5f) p4_bar=%s segment_extrema=%.5f",
+      const bool extremaRejected = (pattern.direction == PATTERN_DIRECTION_LONG && p34SegmentExtrema > pattern.pointPrices[3]) ||
+                                   (pattern.direction == PATTERN_DIRECTION_SHORT && p34SegmentExtrema < pattern.pointPrices[3]);
+      if(extremaRejected)
+        {
+         if(InpEnableExactSearchCompare)
+            PrintFormat("P34_EXTREMA_REJECT symbol=%s direction=%s p3=(%s,%.5f) p4_bar=%s segment_extrema=%.5f",
+                        pattern.symbol,
+                        DirectionToString(pattern.direction),
+                        FormatTime(pattern.pointTimes[3]),
+                        pattern.pointPrices[3],
+                        FormatTime(currentBarTime),
+                        p34SegmentExtrema);
+         ResetPattern(pattern);
+         return(false);
+        }
+
+      if(InpEnableExactSearchCompare && p34HasAdditionalTieExtrema)
+         PrintFormat("P34_EXTREMA_TIE symbol=%s direction=%s p3=(%s,%.5f) p4_bar=%s segment_extrema=%.5f",
                      pattern.symbol,
                      DirectionToString(pattern.direction),
                      FormatTime(pattern.pointTimes[3]),
                      pattern.pointPrices[3],
                      FormatTime(currentBarTime),
                      p34SegmentExtrema);
-      ResetPattern(pattern);
-      return(false);
      }
-
-   if(InpEnableExactSearchCompare && p34HasAdditionalTieExtrema)
-      PrintFormat("P34_EXTREMA_TIE symbol=%s direction=%s p3=(%s,%.5f) p4_bar=%s segment_extrema=%.5f",
-                  pattern.symbol,
-                  DirectionToString(pattern.direction),
-                  FormatTime(pattern.pointTimes[3]),
-                  pattern.pointPrices[3],
-                  FormatTime(currentBarTime),
-                  p34SegmentExtrema);
 
    if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condF))
      {
