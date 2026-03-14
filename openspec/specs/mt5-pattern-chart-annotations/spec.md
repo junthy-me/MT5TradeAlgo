@@ -1,0 +1,61 @@
+# mt5-pattern-chart-annotations Specification
+
+## Purpose
+TBD - created by archiving change annotate-full-trade-lifecycle. Update Purpose after archive.
+
+## Requirements
+### Requirement: 在图表上标注每次成功成交对应的完整模式与后续激活点
+策略 SHALL 在每次成功创建由 EA 管理的成交后，尝试在一个已打开的 MT5 chart 上绘制该笔交易所使用的 `Pre0/P0/P1/P2/P3/P4` 模式；当该持仓后续首次激活合格 `P5/P6` 时，策略 SHALL 在同一组对象命名空间下补充绘制 `P5/P6` 点位与相邻连线。图形标注 SHALL 至少包含这些点位标记、相邻点之间的连线，以及用于突出 `P4` 成交点的强调标记。策略 SHALL 优先使用 EA 当前附着且 `symbol` 匹配的 chart 作为绘制目标；若当前 chart 不匹配，策略 SHALL 回退到其他已打开且匹配 `symbol + timeframe` 的 chart。该 requirement SHALL 同时适用于多头和空头镜像交易，且图表标注 SHALL 仅反映已成立的生命周期点位，不得预绘制尚未形成的未来点位。
+
+#### Scenario: 当前可见 chart 符合同 symbol 时优先绘制到该窗口
+- **WHEN** 某笔成功成交发生时，EA 当前附着的 MT5 chart 与该交易 `symbol` 一致
+- **THEN** 策略优先在该当前 chart 上绘制 `Pre0/P0/P1/P2/P3/P4` 点位标记、相邻连线和 `P4` 成交点强调标记，即使策略内部使用的检测 `timeframe` 与当前 chart 周期不同
+
+#### Scenario: 当前 chart 不匹配时回退到 symbol+timeframe 匹配窗口
+- **WHEN** 某笔成功成交对应的当前附着 chart 不匹配，但 MT5 中存在其他一个已打开且匹配 `symbol + timeframe` 的 chart
+- **THEN** 策略在该回退 chart 上绘制 `Pre0/P0/P1/P2/P3/P4` 点位标记、相邻连线和 `P4` 成交点强调标记
+
+#### Scenario: 首次 P5/P6 激活后补充后续点位
+- **WHEN** 某笔已入场持仓后续首次满足合格 `P5/P6` 激活条件，且存在匹配 chart
+- **THEN** 策略在该 chart 上为同一笔交易补充绘制 `P5/P6` 点位与 `P4-P5-P6` 连线，而不覆盖其他交易的图形对象
+
+#### Scenario: 没有匹配 chart 时不影响交易
+- **WHEN** 某笔成功成交发生时，MT5 中不存在可用于该交易的当前 chart 或回退 chart
+- **THEN** 策略跳过该次图形绘制，且不会影响交易本身的成功创建与后续管理
+
+### Requirement: 为每笔成交使用独立的图形对象命名空间
+策略 SHALL 为每次成功成交创建一组独立命名的图形对象，命名空间 MUST 能区分不同 `symbol`、`timeframe`、`ticket` 和 `p4_bar_time`，从而避免不同交易的模式图互相覆盖。后续 `P5/P6`、结构值和止损线补画 SHALL 继续落到同一笔交易的对象命名空间下。
+
+#### Scenario: 同一图表多次成交时对象不互相覆盖
+- **WHEN** 同一 `symbol + timeframe` 图表上先后出现多次成功成交
+- **THEN** 每次成交的模式图、结构值和止损线对象都保留独立命名，不会因为对象重名覆盖已有图形
+
+#### Scenario: 图形对象可从对象名反查所属交易
+- **WHEN** 操作人员查看某组由策略绘制的模式对象
+- **THEN** 该对象组的命名信息足以定位到其所属的成交记录或 `P4` bar
+
+### Requirement: 每个点位使用固定且彼此不同的颜色
+策略 SHALL 为 `Pre0`、`P0`、`P1`、`P2`、`P3`、`P4`、`P5`、`P6` 分别使用固定颜色，且这些点位颜色 MUST 彼此不同。相同点位在不同交易中的颜色 SHALL 保持一致，以便操作者快速识别模式结构。颜色映射 SHALL 与下表一致：`Pre0=clrRed`、`P0=clrYellow`、`P1=clrOrangeRed`、`P2=clrHotPink`、`P3=clrMagenta`、`P4=clrGold`、`P5=clrWhite`、`P6=clrKhaki`。当传入未知点位标签时，策略 MAY 返回兜底颜色，但 SHALL NOT 改变上述八个标准点位的固定颜色契约。
+
+#### Scenario: 相同点位跨多次交易保持同色
+- **WHEN** 操作人员查看同一图表上两次不同成交绘制出的模式
+- **THEN** 相同角色点位在两次模式中的颜色保持一致
+
+#### Scenario: 不同点位颜色可以直接区分
+- **WHEN** 操作人员查看单次成交的模式图
+- **THEN** `Pre0`、`P0`、`P1`、`P2`、`P3`、`P4`、`P5`、`P6` 可以通过不同颜色直接分辨
+
+### Requirement: 在图表上标注完整生命周期结构值与止损位
+策略 SHALL 在模式图上额外标注关键结构值和风控线，至少包括 `a`、`b1`、`b2`、`c`、`d`、`e`，并 SHALL 标注强止损位与弱止损位，以便操作者直接从图上读取本次交易的重要振幅信息和风控位置。对于尚未形成 `P5/P6` 的交易，策略 SHALL 只绘制当下已成立的结构值与强止损位；当首次 `P5/P6` 激活后，策略 SHALL 在同一交易对象组内补充 `d`、`e` 和弱止损位标注。此类标注 SHALL 只影响图表对象，不得改变交易逻辑或风控判定本身。
+
+#### Scenario: 成交后显示已成立结构值与强止损位
+- **WHEN** 某笔交易的模式图成功绘制到匹配 chart
+- **THEN** 图中同步显示该交易当下已成立的 `a`、`b1`、`b2`、`c` 数值标注，以及强止损位的水平标注
+
+#### Scenario: 首次 P5/P6 激活后显示 d、e 与弱止损位
+- **WHEN** 某笔持仓首次激活合格 `P5/P6` 且模式图成功绘制到匹配 chart
+- **THEN** 图中同步补充该交易的 `d`、`e` 数值标注，以及弱止损位的水平标注
+
+#### Scenario: 标注失败不影响交易主流程
+- **WHEN** 某次点位、结构值或止损线标注创建失败
+- **THEN** 策略仍然保持交易已成功创建并继续后续持仓管理，而不会回滚或改变任何核心交易逻辑

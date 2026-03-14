@@ -1505,6 +1505,569 @@ bool IsManagedPosition(const string symbolFilter)
    return(StringFind(comment, CommentPrefix()) == 0);
   }
 
+string GetPatternPointLabel(const int pointIndex)
+  {
+   switch(pointIndex)
+     {
+      case 0:
+         return("P0");
+      case 1:
+         return("P1");
+      case 2:
+         return("P2");
+      case 3:
+         return("P3");
+      case 4:
+         return("P4");
+      case 5:
+         return("P5");
+      case 6:
+         return("P6");
+      default:
+         return("");
+     }
+  }
+
+color GetAnnotationPointColor(const string pointLabel)
+  {
+   if(pointLabel == "Pre0")
+      return(clrRed);
+   if(pointLabel == "P0")
+      return(clrYellow);
+   if(pointLabel == "P1")
+      return(clrOrangeRed);
+   if(pointLabel == "P2")
+      return(clrHotPink);
+   if(pointLabel == "P3")
+      return(clrMagenta);
+   if(pointLabel == "P4")
+      return(clrGold);
+   if(pointLabel == "P5")
+      return(clrWhite);
+   if(pointLabel == "P6")
+      return(clrKhaki);
+   return(clrWhiteSmoke);
+  }
+
+string FormatPrice(const string symbol, const double price)
+  {
+   const int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   return(DoubleToString(price, digits >= 0 ? digits : 5));
+  }
+
+long FindMatchingChartId(const string symbol)
+  {
+   const long currentChartId = ChartID();
+   // In visual tester, the operator is looking at the EA-attached chart even
+   // when the strategy internally evaluates a different timeframe via InpTF.
+   // Prefer drawing on that visible chart as long as the symbol matches.
+   if(currentChartId >= 0 && ChartSymbol(currentChartId) == symbol)
+      return(currentChartId);
+
+   for(long chartId = ChartFirst(); chartId >= 0; chartId = ChartNext(chartId))
+     {
+      if(ChartSymbol(chartId) == symbol && (ENUM_TIMEFRAMES)ChartPeriod(chartId) == InpTF)
+         return(chartId);
+     }
+
+   return(-1);
+  }
+
+string BuildAnnotationObjectPrefix(const PatternSnapshot &pattern, const ulong ticket)
+  {
+   return(StringFormat("P4A|%s|%d|%I64u|%I64d|",
+                       pattern.symbol,
+                       (int)InpTF,
+                       ticket,
+                       (long)pattern.p4BarTime));
+  }
+
+double GetAnnotationOffset(const PatternSnapshot &pattern)
+  {
+   double minPrice = DBL_MAX;
+   double maxPrice = -DBL_MAX;
+
+   if(pattern.preCondPriorDecline && pattern.pre0Time > 0 && pattern.pre0Price > 0.0)
+     {
+      minPrice = MathMin(minPrice, pattern.pre0Price);
+      maxPrice = MathMax(maxPrice, pattern.pre0Price);
+     }
+
+   for(int i = 0; i < PATTERN_POINT_COUNT; ++i)
+     {
+      if(pattern.pointTimes[i] <= 0 || pattern.pointPrices[i] <= 0.0)
+         continue;
+
+      minPrice = MathMin(minPrice, pattern.pointPrices[i]);
+      maxPrice = MathMax(maxPrice, pattern.pointPrices[i]);
+     }
+
+   if(pattern.hardLossPrice > 0.0)
+     {
+      minPrice = MathMin(minPrice, pattern.hardLossPrice);
+      maxPrice = MathMax(maxPrice, pattern.hardLossPrice);
+     }
+
+   if(pattern.softLossPrice > 0.0)
+     {
+      minPrice = MathMin(minPrice, pattern.softLossPrice);
+      maxPrice = MathMax(maxPrice, pattern.softLossPrice);
+     }
+
+   const double point = SymbolInfoDouble(pattern.symbol, SYMBOL_POINT);
+   const double minimumOffset = MathMax(point * 20.0, 0.01);
+   if(minPrice == DBL_MAX || maxPrice == -DBL_MAX)
+      return(minimumOffset);
+
+   return(MathMax((maxPrice - minPrice) * 0.03, minimumOffset));
+  }
+
+double GetPointLabelPrice(const string pointLabel, const double pointPrice, const double offset)
+  {
+   if(pointLabel == "P0" || pointLabel == "P2" || pointLabel == "P4" || pointLabel == "P5")
+      return(pointPrice - offset);
+   return(pointPrice + offset);
+  }
+
+datetime GetMidpointTime(const datetime fromTime, const datetime toTime)
+  {
+   if(fromTime <= 0)
+      return(toTime);
+   if(toTime <= 0)
+      return(fromTime);
+   return((datetime)(fromTime + ((toTime - fromTime) / 2)));
+  }
+
+double GetMetricLabelPrice(const double fromPrice,
+                           const double toPrice,
+                           const double offset,
+                           const bool placeAbove,
+                           const double offsetScale)
+  {
+   const double basePrice = (fromPrice + toPrice) * 0.5;
+   const double scaledOffset = offset * offsetScale;
+   return(placeAbove ? basePrice + scaledOffset : basePrice - scaledOffset);
+  }
+
+bool UpsertTextObject(const long chartId,
+                      const string name,
+                      const datetime anchorTime,
+                      const double anchorPrice,
+                      const string text,
+                      const color objectColor,
+                      const int fontSize)
+  {
+   if(ObjectFind(chartId, name) < 0)
+     {
+      if(!ObjectCreate(chartId, name, OBJ_TEXT, 0, anchorTime, anchorPrice))
+         return(false);
+     }
+   else
+     {
+      if(!ObjectMove(chartId, name, 0, anchorTime, anchorPrice))
+         return(false);
+     }
+
+   ObjectSetString(chartId, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(chartId, name, OBJPROP_COLOR, objectColor);
+   ObjectSetInteger(chartId, name, OBJPROP_FONTSIZE, fontSize);
+   ObjectSetInteger(chartId, name, OBJPROP_SELECTABLE, false);
+   return(true);
+  }
+
+bool UpsertTrendObject(const long chartId,
+                       const string name,
+                       const datetime time1,
+                       const double price1,
+                       const datetime time2,
+                       const double price2,
+                       const color objectColor,
+                       const int width,
+                       const ENUM_LINE_STYLE style)
+  {
+   if(ObjectFind(chartId, name) < 0)
+     {
+      if(!ObjectCreate(chartId, name, OBJ_TREND, 0, time1, price1, time2, price2))
+         return(false);
+     }
+   else
+     {
+      if(!ObjectMove(chartId, name, 0, time1, price1))
+         return(false);
+      if(!ObjectMove(chartId, name, 1, time2, price2))
+         return(false);
+     }
+
+   ObjectSetInteger(chartId, name, OBJPROP_COLOR, objectColor);
+   ObjectSetInteger(chartId, name, OBJPROP_WIDTH, width);
+   ObjectSetInteger(chartId, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(chartId, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(chartId, name, OBJPROP_SELECTABLE, false);
+   return(true);
+  }
+
+bool UpsertHLineObject(const long chartId,
+                       const string name,
+                       const datetime anchorTime,
+                       const double price,
+                       const color objectColor,
+                       const ENUM_LINE_STYLE style)
+  {
+   if(ObjectFind(chartId, name) < 0)
+     {
+      if(!ObjectCreate(chartId, name, OBJ_HLINE, 0, anchorTime, price))
+         return(false);
+     }
+
+   ObjectSetDouble(chartId, name, OBJPROP_PRICE, price);
+   ObjectSetInteger(chartId, name, OBJPROP_COLOR, objectColor);
+   ObjectSetInteger(chartId, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(chartId, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(chartId, name, OBJPROP_SELECTABLE, false);
+   return(true);
+  }
+
+void AnnotatePointLabel(const long chartId,
+                        const string objectPrefix,
+                        const string pointLabel,
+                        const datetime pointTime,
+                        const double pointPrice,
+                        const double offset)
+  {
+   if(pointTime <= 0 || pointPrice <= 0.0)
+      return;
+
+   const bool emphasize = (pointLabel == "P4");
+   const string text = emphasize ? "P4*" : pointLabel;
+   UpsertTextObject(chartId,
+                    objectPrefix + "POINT|" + pointLabel,
+                    pointTime,
+                    GetPointLabelPrice(pointLabel, pointPrice, emphasize ? offset * 1.5 : offset),
+                    text,
+                    GetAnnotationPointColor(pointLabel),
+                    emphasize ? 11 : 9);
+  }
+
+void AnnotateSegment(const long chartId,
+                     const string objectPrefix,
+                     const string fromLabel,
+                     const datetime fromTime,
+                     const double fromPrice,
+                     const string toLabel,
+                     const datetime toTime,
+                     const double toPrice,
+                     const ENUM_LINE_STYLE style)
+  {
+   if(fromTime <= 0 || toTime <= 0 || fromPrice <= 0.0 || toPrice <= 0.0)
+      return;
+
+   UpsertTrendObject(chartId,
+                     objectPrefix + "SEG|" + fromLabel + "|" + toLabel,
+                     fromTime,
+                     fromPrice,
+                     toTime,
+                     toPrice,
+                     GetAnnotationPointColor(toLabel),
+                     1,
+                     style);
+  }
+
+void AnnotateMetricLabel(const long chartId,
+                         const string objectPrefix,
+                         const string symbol,
+                         const string metricLabel,
+                         const datetime fromTime,
+                         const double fromPrice,
+                         const datetime toTime,
+                         const double toPrice,
+                         const double metricValue,
+                         const double offset,
+                         const bool placeAbove,
+                         const double offsetScale,
+                         const color objectColor)
+  {
+   if(metricValue <= 0.0 || fromTime <= 0 || toTime <= 0 || fromPrice <= 0.0 || toPrice <= 0.0)
+      return;
+
+   UpsertTextObject(chartId,
+                    objectPrefix + "METRIC|" + metricLabel,
+                    GetMidpointTime(fromTime, toTime),
+                    GetMetricLabelPrice(fromPrice, toPrice, offset, placeAbove, offsetScale),
+                    metricLabel + "=" + FormatPrice(symbol, metricValue),
+                    objectColor,
+                    8);
+  }
+
+void AnnotateStructureMetrics(const long chartId,
+                              const string objectPrefix,
+                              const PatternSnapshot &pattern,
+                              const double offset)
+  {
+   AnnotateMetricLabel(chartId,
+                       objectPrefix,
+                       pattern.symbol,
+                       "b1",
+                       pattern.pointTimes[0],
+                       pattern.pointPrices[0],
+                       pattern.pointTimes[2],
+                       pattern.pointPrices[2],
+                       pattern.b1,
+                       offset,
+                       true,
+                       1.5,
+                       clrDeepSkyBlue);
+
+   AnnotateMetricLabel(chartId,
+                       objectPrefix,
+                       pattern.symbol,
+                       "a",
+                       pattern.pointTimes[1],
+                       pattern.pointPrices[1],
+                       pattern.pointTimes[2],
+                       pattern.pointPrices[2],
+                       pattern.a,
+                       offset,
+                       true,
+                       0.9,
+                       clrAqua);
+
+   AnnotateMetricLabel(chartId,
+                       objectPrefix,
+                       pattern.symbol,
+                       "b2",
+                       pattern.pointTimes[1],
+                       pattern.pointPrices[1],
+                       pattern.pointTimes[3],
+                       pattern.pointPrices[3],
+                       pattern.b2,
+                       offset,
+                       false,
+                       1.5,
+                       clrMediumPurple);
+
+   AnnotateMetricLabel(chartId,
+                       objectPrefix,
+                       pattern.symbol,
+                       "c",
+                       pattern.pointTimes[3],
+                       pattern.pointPrices[3],
+                       pattern.pointTimes[4],
+                       pattern.pointPrices[4],
+                       pattern.c,
+                       offset,
+                       true,
+                       1.1,
+                       clrLightSkyBlue);
+
+   if(pattern.pointTimes[5] > 0 && pattern.pointTimes[6] > 0)
+     {
+      AnnotateMetricLabel(chartId,
+                          objectPrefix,
+                          pattern.symbol,
+                          "d",
+                          pattern.pointTimes[4],
+                          pattern.pointPrices[4],
+                          pattern.pointTimes[5],
+                          pattern.pointPrices[5],
+                          pattern.d,
+                          offset,
+                          true,
+                          0.9,
+                          clrOrange);
+
+      AnnotateMetricLabel(chartId,
+                          objectPrefix,
+                          pattern.symbol,
+                          "e",
+                          pattern.pointTimes[5],
+                          pattern.pointPrices[5],
+                          pattern.pointTimes[6],
+                          pattern.pointPrices[6],
+                          pattern.e,
+                          offset,
+                          false,
+                          1.0,
+                          clrKhaki);
+     }
+  }
+
+void AnnotateStructureSummary(const long chartId,
+                              const string objectPrefix,
+                              const PatternSnapshot &pattern,
+                              const double offset)
+  {
+   datetime anchorTime = pattern.pointTimes[4];
+   if(pattern.pointTimes[6] > 0)
+      anchorTime = pattern.pointTimes[6];
+
+   double maxPrice = pattern.pointPrices[4];
+   if(pattern.preCondPriorDecline && pattern.pre0Price > maxPrice)
+      maxPrice = pattern.pre0Price;
+
+   for(int i = 0; i < PATTERN_POINT_COUNT; ++i)
+     {
+      if(pattern.pointTimes[i] > 0 && pattern.pointPrices[i] > maxPrice)
+         maxPrice = pattern.pointPrices[i];
+     }
+
+   if(pattern.hardLossPrice > maxPrice)
+      maxPrice = pattern.hardLossPrice;
+   if(pattern.softLossPrice > maxPrice)
+      maxPrice = pattern.softLossPrice;
+
+   string summary = StringFormat("a=%s b1=%s b2=%s c=%s",
+                                 FormatPrice(pattern.symbol, pattern.a),
+                                 FormatPrice(pattern.symbol, pattern.b1),
+                                 FormatPrice(pattern.symbol, pattern.b2),
+                                 FormatPrice(pattern.symbol, pattern.c));
+   if(pattern.pointTimes[5] > 0 && pattern.pointTimes[6] > 0)
+      summary += StringFormat("\nd=%s e=%s",
+                              FormatPrice(pattern.symbol, pattern.d),
+                              FormatPrice(pattern.symbol, pattern.e));
+
+   UpsertTextObject(chartId,
+                    objectPrefix + "SUMMARY",
+                    anchorTime,
+                    maxPrice + offset * 3.0,
+                    summary,
+                    clrAqua,
+                    9);
+  }
+
+void AnnotateStopLines(const long chartId,
+                       const string objectPrefix,
+                       const PatternSnapshot &pattern,
+                       const double offset)
+  {
+   const datetime hardAnchorTime = pattern.pointTimes[4] > 0 ? pattern.pointTimes[4] : pattern.pointTimes[0];
+   if(pattern.hardLossPrice > 0.0)
+     {
+      UpsertHLineObject(chartId,
+                        objectPrefix + "STOP|HARD",
+                        hardAnchorTime,
+                        pattern.hardLossPrice,
+                        clrRed,
+                        STYLE_DASH);
+      UpsertTextObject(chartId,
+                       objectPrefix + "STOPTXT|HARD",
+                       hardAnchorTime,
+                       pattern.hardLossPrice + offset,
+                       "HardStop " + FormatPrice(pattern.symbol, pattern.hardLossPrice),
+                       clrRed,
+                       8);
+     }
+
+   if(pattern.softLossPrice > 0.0)
+     {
+      const datetime softAnchorTime = pattern.pointTimes[6] > 0 ? pattern.pointTimes[6] : hardAnchorTime;
+      UpsertHLineObject(chartId,
+                        objectPrefix + "STOP|SOFT",
+                        softAnchorTime,
+                        pattern.softLossPrice,
+                        clrOrange,
+                        STYLE_DASHDOT);
+      UpsertTextObject(chartId,
+                       objectPrefix + "STOPTXT|SOFT",
+                       softAnchorTime,
+                       pattern.softLossPrice + offset * 2.0,
+                       "SoftStop " + FormatPrice(pattern.symbol, pattern.softLossPrice),
+                       clrOrange,
+                       8);
+     }
+  }
+
+void AnnotateTradeLifecycle(const PatternSnapshot &pattern, const ulong ticket)
+  {
+   if(!pattern.valid)
+      return;
+
+   const long chartId = FindMatchingChartId(pattern.symbol);
+   if(chartId < 0)
+     {
+      PrintFormat("Annotation skipped because no matching chart is open. symbol=%s timeframe=%s ticket=%I64u p4_bar=%s",
+                  pattern.symbol,
+                  EnumToString(InpTF),
+                  ticket,
+                  FormatTime(pattern.p4BarTime));
+      return;
+     }
+
+   const string objectPrefix = BuildAnnotationObjectPrefix(pattern, ticket);
+   const double offset = GetAnnotationOffset(pattern);
+
+   if(pattern.preCondPriorDecline && pattern.pre0Time > 0 && pattern.pre0Price > 0.0)
+     {
+      AnnotatePointLabel(chartId,
+                         objectPrefix,
+                         "Pre0",
+                         pattern.pre0Time,
+                         pattern.pre0Price,
+                         offset);
+      AnnotateSegment(chartId,
+                      objectPrefix,
+                      "Pre0",
+                      pattern.pre0Time,
+                      pattern.pre0Price,
+                      "P0",
+                      pattern.pointTimes[0],
+                      pattern.pointPrices[0],
+                      STYLE_DOT);
+     }
+
+   const int lastKnownPoint = (pattern.pointTimes[5] > 0 && pattern.pointTimes[6] > 0) ? 6 : 4;
+   for(int i = 0; i <= lastKnownPoint; ++i)
+     {
+      if(pattern.pointTimes[i] <= 0 || pattern.pointPrices[i] <= 0.0)
+         continue;
+
+      AnnotatePointLabel(chartId,
+                         objectPrefix,
+                         GetPatternPointLabel(i),
+                         pattern.pointTimes[i],
+                         pattern.pointPrices[i],
+                         offset);
+     }
+
+   for(int i = 0; i < lastKnownPoint; ++i)
+     {
+      if(pattern.pointTimes[i] <= 0 || pattern.pointTimes[i + 1] <= 0)
+         continue;
+
+      if(pattern.pointPrices[i] <= 0.0 || pattern.pointPrices[i + 1] <= 0.0)
+         continue;
+
+      AnnotateSegment(chartId,
+                      objectPrefix,
+                      GetPatternPointLabel(i),
+                      pattern.pointTimes[i],
+                      pattern.pointPrices[i],
+                      GetPatternPointLabel(i + 1),
+                      pattern.pointTimes[i + 1],
+                      pattern.pointPrices[i + 1],
+                      STYLE_SOLID);
+     }
+
+   AnnotateStructureMetrics(chartId, objectPrefix, pattern, offset);
+   AnnotateStructureSummary(chartId, objectPrefix, pattern, offset);
+   AnnotateStopLines(chartId, objectPrefix, pattern, offset);
+   ChartRedraw(chartId);
+   PrintFormat("ANNOTATION symbol=%s ticket=%I64u chart=%I64d stage=%s points=%s hard_stop=%s soft_stop=%s "
+               "a=%s b1=%s b2=%s c=%s d=%s e=%s",
+               pattern.symbol,
+               ticket,
+               chartId,
+               lastKnownPoint >= 6 ? "full_lifecycle" : "entry",
+               lastKnownPoint >= 6 ? "Pre0,P0,P1,P2,P3,P4,P5,P6" : "Pre0,P0,P1,P2,P3,P4",
+               FormatPrice(pattern.symbol, pattern.hardLossPrice),
+               pattern.softLossPrice > 0.0 ? FormatPrice(pattern.symbol, pattern.softLossPrice) : "n/a",
+               FormatPrice(pattern.symbol, pattern.a),
+               FormatPrice(pattern.symbol, pattern.b1),
+               FormatPrice(pattern.symbol, pattern.b2),
+               FormatPrice(pattern.symbol, pattern.c),
+               pattern.d > 0.0 ? FormatPrice(pattern.symbol, pattern.d) : "n/a",
+               pattern.e > 0.0 ? FormatPrice(pattern.symbol, pattern.e) : "n/a");
+  }
+
 void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
   {
    MqlTick tick;
@@ -1556,6 +2119,7 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
      }
 
    RegisterManagedPosition(ticket, pattern.symbol, pattern);
+   AnnotateTradeLifecycle(pattern, ticket);
    state.lastSuccessfulEntryBarTime = pattern.p4BarTime;
    MarkBackboneSuccess(state, pattern, pattern.p4BarTime);
    LogEntry(pattern, trade.ResultPrice(), orderComment, ticket);
@@ -1729,6 +2293,8 @@ void UpdateSoftStopState(ManagedPositionState &state)
    state.snapshot.profitPrice = candidate.profitPrice;
    state.softStopActive = true;
    state.p5ActivationFrozen = true;
+
+   AnnotateTradeLifecycle(state.snapshot, state.ticket);
 
    PrintFormat("Soft stop and P5-anchored profit activated. symbol=%s ticket=%I64u soft_loss=%.5f rewritten_profit=%.5f "
                "selected_p5=(%s,%.5f) p6=(%s,%.5f) d=%.5f e=%.5f c=%.5f structure=%.5f",
