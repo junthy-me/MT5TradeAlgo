@@ -317,7 +317,7 @@
 3. 设置 `InpSymbols`、`InpTF`、`InpFixedLots` 等运行参数，确认目标品种已在 Market Watch 中可用。
 4. 如果想看图上模式，提前打开你关心品种且周期等于 `InpTF` 的图表。
 5. 打开 Experts / Journal，先确认初始化日志，再观察 `ENTRY_P4` 是否清楚列出 `P0-P4` 点位，并检查图表上是否出现对应的 `Pre0-P4`、高度值和强止损标注；若后续触发合格 `P5/P6`，再确认图上是否补出 `P5/P6` 和弱止损位。
-6. 实盘前先用 Strategy Tester 回测，重点检查止盈/止损观察窗口、共享骨架锁、多空共享的 `P4` bar 锁，以及首次 `P5/P6` 激活后多头最低 `P5` / 空头最高 `P5` 的选择是否符合预期。
+6. 实盘前先用 Strategy Tester 回测，重点检查止盈/止损观察窗口、共享骨架锁、多空共享的 `P4` bar 锁，以及首次 `P5/P6` 激活后多头最低 `P5` / 空头最高 `P5` 的选择是否符合预期；回测结束时再确认 Experts / Journal 中是否出现中文 `回测总结`，其中会打印总收益率、模式匹配次数、模式匹配胜率等汇总指标。
 
 ## 使用建议
 
@@ -327,4 +327,4 @@
 2. 再重点理解四组门槛：`CondA`、`a/P1P2/bSum` 结构门槛、`Pre0` 前置 move、`P4` 实时触发。
 3. 最后再调交易参数，特别是 `InpProfitObservationBars`、`InpStopObservationBars`、`InpP5P6ReboundMinRatioOfP3P5Drop`、`InpP5AnchoredProfitC` 和 `InpMaxPositionsPerSymbol`。
 
-如果需要回测，可直接使用 `mt5/P4PatternStrategy.mq5`，并通过 MT5 Strategy Tester 观察 `ENTRY_P4` 日志是否准确对应到图上的 `Pre0-P4` 标注，以及后续 `P5/P6` 与止损线是否按持仓演化补画。
+如果需要回测，可直接使用 `mt5/P4PatternStrategy.mq5`，并通过 MT5 Strategy Tester 观察 `ENTRY_P4` 日志是否准确对应到图上的 `Pre0-P4` 标注，以及后续 `P5/P6` 与止损线是否按持仓演化补画。回测 run 结束后，策略会额外打印一条 `回测总结`，用于快速查看 `总收益率`、`模式匹配次数`、`已闭仓笔数`、`模式匹配胜率` 等核心结果。

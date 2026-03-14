@@ -179,11 +179,26 @@ struct ManagedPositionState
    P5ActivationCandidate observedP5Candidates[];
   };
 
+struct BacktestSummaryState
+  {
+   double            initialBalance;
+   double            finalBalance;
+   int               matchedPatterns;
+   int               closedTrades;
+   int               winningTrades;
+   int               losingTrades;
+   int               breakevenTrades;
+   double            netPoints;
+   double            grossProfitPoints;
+   double            grossLossPoints;
+  };
+
 CTrade trade;
 string g_symbols[];
 SymbolRuntimeState g_symbolStates[];
 ManagedPositionState g_positionStates[];
 bool g_requiredSwingExtremaSegments[SWING_EXTREMA_SEGMENT_CONFIG_COUNT];
+BacktestSummaryState g_backtestSummary;
 
 int OnInit()
   {
@@ -195,6 +210,8 @@ int OnInit()
 
    if(!ParseSymbols())
       return(INIT_PARAMETERS_INCORRECT);
+
+   InitializeBacktestSummary();
 
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippagePoints);
@@ -217,6 +234,12 @@ void OnDeinit(const int reason)
   {
    EventKillTimer();
    PrintFormat("Deinitialized P4PatternStrategy. reason=%d", reason);
+  }
+
+double OnTester()
+  {
+   EmitBacktestSummary();
+   return(0.0);
   }
 
 void OnTick()
@@ -587,6 +610,117 @@ int DirectionSign(const PatternDirection direction)
 string DirectionToString(const PatternDirection direction)
   {
    return(direction == PATTERN_DIRECTION_SHORT ? "short" : "long");
+  }
+
+void ResetBacktestSummary()
+  {
+   g_backtestSummary.initialBalance = 0.0;
+   g_backtestSummary.finalBalance = 0.0;
+   g_backtestSummary.matchedPatterns = 0;
+   g_backtestSummary.closedTrades = 0;
+   g_backtestSummary.winningTrades = 0;
+   g_backtestSummary.losingTrades = 0;
+   g_backtestSummary.breakevenTrades = 0;
+   g_backtestSummary.netPoints = 0.0;
+   g_backtestSummary.grossProfitPoints = 0.0;
+   g_backtestSummary.grossLossPoints = 0.0;
+  }
+
+void InitializeBacktestSummary()
+  {
+   ResetBacktestSummary();
+   g_backtestSummary.initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_backtestSummary.finalBalance = g_backtestSummary.initialBalance;
+  }
+
+void RecordMatchedPattern()
+  {
+   ++g_backtestSummary.matchedPatterns;
+  }
+
+double GetDirectionalPnlPoints(const PatternDirection direction, const double entryPrice, const double exitPrice)
+  {
+   return(GetDirectionalMove(direction, entryPrice, exitPrice));
+  }
+
+void RecordClosedMatch(const double pnlPoints)
+  {
+   ++g_backtestSummary.closedTrades;
+   g_backtestSummary.netPoints += pnlPoints;
+
+   if(pnlPoints > 0.0)
+     {
+      ++g_backtestSummary.winningTrades;
+      g_backtestSummary.grossProfitPoints += pnlPoints;
+      return;
+     }
+
+   if(pnlPoints < 0.0)
+     {
+      ++g_backtestSummary.losingTrades;
+      g_backtestSummary.grossLossPoints += MathAbs(pnlPoints);
+      return;
+     }
+
+   ++g_backtestSummary.breakevenTrades;
+  }
+
+double CalculateTotalReturnPct()
+  {
+   if(g_backtestSummary.initialBalance <= 0.0)
+      return(0.0);
+   return(((g_backtestSummary.finalBalance - g_backtestSummary.initialBalance) / g_backtestSummary.initialBalance) * 100.0);
+  }
+
+double CalculatePatternMatchWinRatePct()
+  {
+   if(g_backtestSummary.matchedPatterns <= 0)
+      return(0.0);
+   return(((double)g_backtestSummary.winningTrades / (double)g_backtestSummary.matchedPatterns) * 100.0);
+  }
+
+double CalculateClosedTradeWinRatePct()
+  {
+   if(g_backtestSummary.closedTrades <= 0)
+      return(0.0);
+   return(((double)g_backtestSummary.winningTrades / (double)g_backtestSummary.closedTrades) * 100.0);
+  }
+
+string FormatPercentValue(const double value)
+  {
+   return(StringFormat("%.2f%%", value));
+  }
+
+string FormatProfitFactorValue()
+  {
+   if(g_backtestSummary.grossLossPoints == 0.0)
+     {
+      if(g_backtestSummary.grossProfitPoints == 0.0)
+         return("0.00");
+      return("inf");
+     }
+
+   return(StringFormat("%.2f", g_backtestSummary.grossProfitPoints / g_backtestSummary.grossLossPoints));
+  }
+
+void EmitBacktestSummary()
+  {
+   g_backtestSummary.finalBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   PrintFormat("回测总结 品种=%s 周期=%s 初始资金=%.2f 结束资金=%.2f 总收益率=%s 模式匹配次数=%d 已闭仓笔数=%d 盈利笔数=%d 亏损笔数=%d 平局笔数=%d 模式匹配胜率=%s 闭仓胜率=%s 净点数=%.5f 盈亏比=%s",
+               InpSymbols,
+               EnumToString(InpTF),
+               g_backtestSummary.initialBalance,
+               g_backtestSummary.finalBalance,
+               FormatPercentValue(CalculateTotalReturnPct()),
+               g_backtestSummary.matchedPatterns,
+               g_backtestSummary.closedTrades,
+               g_backtestSummary.winningTrades,
+               g_backtestSummary.losingTrades,
+               g_backtestSummary.breakevenTrades,
+               FormatPercentValue(CalculatePatternMatchWinRatePct()),
+               FormatPercentValue(CalculateClosedTradeWinRatePct()),
+               g_backtestSummary.netPoints,
+               FormatProfitFactorValue());
   }
 
 bool IsDirectionEnabled(const PatternDirection direction)
@@ -2363,6 +2497,7 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
    RegisterManagedPosition(ticket, pattern.symbol, pattern);
    state.lastSuccessfulEntryBarTime = pattern.p4BarTime;
    MarkBackboneSuccess(state, pattern, pattern.p4BarTime);
+   RecordMatchedPattern();
    string annotationStatus = "";
    DrawEntryPatternAnnotation(pattern, ticket, annotationStatus);
    LogEntry(pattern, trade.ResultPrice(), ticket, annotationStatus);
@@ -2558,11 +2693,14 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
 
    const ulong ticket = g_positionStates[stateIndex].ticket;
    const string symbol = g_positionStates[stateIndex].symbol;
+   const PatternDirection direction = g_positionStates[stateIndex].snapshot.direction;
    if(!PositionSelectByTicket(ticket))
      {
       RemovePositionState(stateIndex);
       return;
      }
+
+   const double entryPrice = NormalizePrice(symbol, PositionGetDouble(POSITION_PRICE_OPEN));
 
    if(!trade.PositionClose(ticket, InpSlippagePoints))
      {
@@ -2574,6 +2712,15 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
                   trade.ResultRetcodeDescription());
       return;
      }
+
+   double executedPrice = trade.ResultPrice();
+   if(executedPrice <= 0.0)
+      executedPrice = triggerPrice;
+   executedPrice = NormalizePrice(symbol, executedPrice);
+
+   const double pnlPoints = GetDirectionalPnlPoints(direction, entryPrice, executedPrice);
+   RecordClosedMatch(pnlPoints);
+   LogExit(g_positionStates[stateIndex].snapshot, ticket, reason, triggerPrice, entryPrice, executedPrice, pnlPoints);
 
    if(reason == "profit_target" || reason == "hard_stop" || reason == "soft_stop")
      {
@@ -2653,6 +2800,25 @@ void LogP5Activation(const PatternSnapshot &pattern,
                barExtremeAtP5Confirmation,
                pattern.softLossPrice,
                pattern.profitPrice);
+  }
+
+void LogExit(const PatternSnapshot &pattern,
+             const ulong ticket,
+             const string reason,
+             const double triggerPrice,
+             const double entryPrice,
+             const double executedPrice,
+             const double pnlPoints)
+  {
+   PrintFormat("EXIT symbol=%s ticket=%I64u reason=%s trigger=%.5f executed=%.5f pnl_points=%.5f direction=%s entry=%.5f",
+               pattern.symbol,
+               ticket,
+               reason,
+               triggerPrice,
+               executedPrice,
+               pnlPoints,
+               DirectionToString(pattern.direction),
+               entryPrice);
   }
 
 string FormatTime(const datetime value)
