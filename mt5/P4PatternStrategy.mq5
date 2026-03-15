@@ -200,6 +200,35 @@ ManagedPositionState g_positionStates[];
 bool g_requiredSwingExtremaSegments[SWING_EXTREMA_SEGMENT_CONFIG_COUNT];
 BacktestSummaryState g_backtestSummary;
 
+string MarginModeToString(const long marginMode)
+  {
+   switch((ENUM_ACCOUNT_MARGIN_MODE)marginMode)
+     {
+      case ACCOUNT_MARGIN_MODE_RETAIL_NETTING:
+         return("RETAIL_NETTING");
+      case ACCOUNT_MARGIN_MODE_EXCHANGE:
+         return("EXCHANGE");
+      case ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:
+         return("RETAIL_HEDGING");
+      default:
+         return(StringFormat("UNKNOWN(%I64d)", marginMode));
+     }
+  }
+
+bool ValidateAccountMode()
+  {
+   const long marginMode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   if((ENUM_ACCOUNT_MARGIN_MODE)marginMode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+     {
+      PrintFormat("Unsupported account margin mode. expected=%s actual=%s",
+                  "RETAIL_HEDGING",
+                  MarginModeToString(marginMode));
+      return(false);
+     }
+
+   return(true);
+  }
+
 int OnInit()
   {
    if(!ValidateInputs())
@@ -209,6 +238,9 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
 
    if(!ParseSymbols())
+      return(INIT_PARAMETERS_INCORRECT);
+
+   if(!ValidateAccountMode())
       return(INIT_PARAMETERS_INCORRECT);
 
    InitializeBacktestSummary();
@@ -1558,7 +1590,7 @@ bool EvaluatePriorMovePrecondition(MqlRates &rates[], PatternSnapshot &pattern)
          continue;
 
       const double pre0Price = NormalizePrice(pattern.symbol, GetPointPriceForRate(pattern.direction, PRE0_POINT_INDEX, rates[i]));
-      const double move = NormalizePrice(pattern.symbol, GetDirectionalMove(pattern.direction, pre0Price, pattern.pointPrices[0]));
+      const double move = NormalizePrice(pattern.symbol, GetDirectionalMove(pattern.direction, pattern.pointPrices[0], pre0Price));
       if(move <= minRequiredMove)
          continue;
 
@@ -2025,6 +2057,12 @@ bool ArePatternsEquivalent(const bool lhsValid,
       return(true);
 
    return(lhs.direction == rhs.direction &&
+          lhs.preCondPriorMove == rhs.preCondPriorMove &&
+          lhs.pre0Time == rhs.pre0Time &&
+          lhs.pre0Price == rhs.pre0Price &&
+          lhs.pre0Move == rhs.pre0Move &&
+          lhs.pre0MinRequiredMove == rhs.pre0MinRequiredMove &&
+          lhs.pre0BarsBetweenP0 == rhs.pre0BarsBetweenP0 &&
           lhs.pointTimes[0] == rhs.pointTimes[0] &&
           lhs.pointTimes[1] == rhs.pointTimes[1] &&
           lhs.pointTimes[2] == rhs.pointTimes[2] &&
@@ -2420,7 +2458,7 @@ bool FindPreferredQualifiedP5ActivationCandidate(const ManagedPositionState &sta
       candidate.barExtremeAtP5Confirmation = observed.barExtremeAtP5Confirmation;
       candidate.softLossPrice = NormalizePrice(state.symbol, InpSoftLossC * observed.p5Price);
       candidate.profitPrice = NormalizePrice(state.symbol,
-                                             observed.p5Price - (DirectionSign(state.snapshot.direction) * InpP5AnchoredProfitC * structureValue));
+                                             observed.p5Price + (DirectionSign(state.snapshot.direction) * InpP5AnchoredProfitC * structureValue));
      }
 
    return(candidate.valid);
@@ -2460,13 +2498,14 @@ void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
       return;
 
    const double entryPrice = NormalizePrice(pattern.symbol, GetEntryReferencePrice(pattern.direction, tick));
-   if(entryPrice <= 0.0)
+   const double managedPrice = NormalizePrice(pattern.symbol, GetManagedReferencePrice(pattern.direction, tick));
+   if(entryPrice <= 0.0 || managedPrice <= 0.0)
       return;
 
-   if(IsStopTriggeredForDirection(pattern.direction, entryPrice, pattern.hardLossPrice))
+   if(IsStopTriggeredForDirection(pattern.direction, managedPrice, pattern.hardLossPrice))
       return;
 
-   if(IsProfitTargetActive(pattern) && IsProfitTriggeredForDirection(pattern.direction, entryPrice, pattern.profitPrice))
+   if(IsProfitTargetActive(pattern) && IsProfitTriggeredForDirection(pattern.direction, managedPrice, pattern.profitPrice))
       return;
 
    const string orderComment = BuildOrderComment(pattern);

@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: 从 MT5 K 线数据中识别 PRD 定义的 P0-P6 多头模式
-策略 SHALL 针对每个已配置的交易品种和周期分析已收盘的 bar，并根据 `InpTradeDirectionMode` 识别当前启用方向的 `P0-P6` 候选点位。`LONG_ONLY` SHALL 仅保留多头模式，`SHORT_ONLY` SHALL 仅保留空头镜像模式，`BOTH` SHALL 同时评估两种方向。检测器 SHALL 为每个候选序列生成标准化模式快照，并显式记录其 `direction`、点位时间、点位价格、空间变量和时间变量。
+策略 SHALL 针对每个已配置的交易品种和周期分析已收盘的 bar，并根据 `InpTradeDirectionMode` 识别当前启用方向的 `P0-P6` 候选点位。`LONG_ONLY` SHALL 仅保留多头模式，`SHORT_ONLY` SHALL 仅保留空头镜像模式，`BOTH` SHALL 在检测阶段同时评估两种方向。当前实现中，检测器对同一时刻的最终输出 SHALL 只保留一份标准化模式快照，而不是并行输出多头和空头两份最终候选；该快照 MUST 显式记录其 `direction`、点位时间、点位价格、空间变量和时间变量。
 
 #### Scenario: LONG_ONLY 模式下仅输出多头候选
 - **WHEN** `InpTradeDirectionMode=LONG_ONLY`
@@ -11,9 +11,9 @@
 - **WHEN** `InpTradeDirectionMode=SHORT_ONLY`
 - **THEN** 检测器只会输出满足空头镜像结构的完整匹配，而不会输出多头候选
 
-#### Scenario: BOTH 模式下快照必须携带方向
+#### Scenario: BOTH 模式下最终候选必须携带方向
 - **WHEN** `InpTradeDirectionMode=BOTH` 且某个交易品种同时存在多头与空头候选
-- **THEN** 检测器分别输出对应方向的模式快照，且每份快照都包含明确的 `direction`
+- **THEN** 检测器内部同时评估两个方向，但对当前时刻只输出一个最终候选快照，且该快照包含明确的 `direction`
 
 ### Requirement: 强制执行可配置的点位取值与单段跨度规则
 策略 SHALL 继续使用 `InpAdjustPointMinSpanKNumber` 和 `InpAdjustPointMaxSpanKNumber` 共同限制相邻点之间的单段跨度，其中 `SpanKNumber` SHALL 定义为起点与终点之间中间间隔的 K 线数量。策略 SHALL 按方向固定点位角色，而 SHALL NOT 再允许通过统一的取价模式覆盖这种方向角色规则：多头模式中 `P0/P2/P5` 取低点、`P1/P3/P6` 取高点、`P4` 取实时 `ask`；空头镜像模式中 `P0/P2/P5` 取高点、`P1/P3/P6` 取低点、`P4` 取实时 `bid`。对于历史骨架中的每一条线段，策略 SHALL 按当前方向验证端点达到该段应有的整段极值，并默认允许并列极值。
@@ -44,6 +44,10 @@
 #### Scenario: 同一 P3 时间下按方向选择更优的 P4
 - **WHEN** 两个候选具有相同的 `P3` 时间且其他条件均成立
 - **THEN** 检测器在多头方向选择更低的 `P4`，并在空头方向选择更高的 `P4`
+
+#### Scenario: BOTH 模式下跨方向候选只保留一个最终结果
+- **WHEN** `InpTradeDirectionMode=BOTH` 且同一时刻同时存在可触发的多头与空头候选
+- **THEN** 当前实现只保留一个最终候选快照继续进入后续交易门控；未来可以优化为同时保留双方向快照再交由交易层共享门控裁决
 
 #### Scenario: 全部约束与先决条件通过时输出方向化完整匹配
 - **WHEN** 某个候选序列在当前输入配置下满足本 requirement 的全部结构约束、方向约束和启用的 pattern preconditions
