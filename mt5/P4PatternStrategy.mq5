@@ -1256,18 +1256,7 @@ bool CreateAnnotationLevel(const long chartId,
                            const double levelPrice,
                            const color levelColor)
   {
-   const string lineName = objectPrefix + "_" + levelLabel + "_LINE";
    const string textName = objectPrefix + "_" + levelLabel + "_TEXT";
-   if(ObjectFind(chartId, lineName) >= 0)
-      ObjectDelete(chartId, lineName);
-   if(!ObjectCreate(chartId, lineName, OBJ_HLINE, 0, 0, levelPrice))
-      return(false);
-
-   ConfigureAnnotationObject(chartId, lineName);
-   ObjectSetInteger(chartId, lineName, OBJPROP_COLOR, levelColor);
-   ObjectSetInteger(chartId, lineName, OBJPROP_STYLE, STYLE_DASH);
-   ObjectSetInteger(chartId, lineName, OBJPROP_WIDTH, 1);
-
    return(CreateAnnotationValueLabel(chartId,
                                      textName,
                                      anchorTime,
