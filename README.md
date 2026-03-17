@@ -70,7 +70,7 @@
 - 多头：`P1 > P0`、`P2 > P0`、`P2 < P1`、`P3 > P1`
 - 空头：`P1 < P0`、`P2 < P0`、`P2 > P1`、`P3 < P1`
 
-除了这些点位关系，历史骨架现在还必须满足“端点就是该段极值”的线段约束，且默认允许并列极值。这些约束由 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 控制，默认值为 `"true,true,true,true,true"`：
+除了这些点位关系，历史骨架现在还必须满足“端点就是该段极值”的线段约束，且默认允许并列极值。这些约束由 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 控制，当前默认值为 `"false,false,false,false,false"`：
 
 - `Pre0P0`：控制 `Pre0 -> P0` 段是否要求两个端点达到该段极值
 - `P0P1`、`P1P2`、`P2P3`：分别控制对应历史骨架段是否要求两个端点达到该段极值
@@ -91,7 +91,7 @@
 - `Pre0` 前置 move 先决条件：
   - 只有在 `InpPreCondEnable = true` 时才启用
   - 在 `P0` 之前最近 `InpPreCondPriorMoveLookbackBars` 根 K 线内，必须存在一个 `Pre0`
-  - `Pre0 -> P0` 的方向性 move 要大于 `InpPreCondPriorMoveMinRatioOfStructure * (a + b1)`
+  - `Pre0 -> P0` 的方向性 move 要大于 `InpPreCondPriorMoveMinRatioOfStructure * (a + b1 + b2)`
   - `Pre0` 与 `P0` 之间的中间 K 线数量必须 `>= InpPreCondPriorMoveMinBarsBetweenPre0AndP0`
   - 只有当 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 的 `Pre0P0` 位置为 `true` 时，才要求多头下 `Pre0` 达到该段最高点、`P0` 达到该段最低点；空头按镜像要求 `Pre0` 达到该段最低点、`P0` 达到该段最高点；如果段内有并列极值，端点只要达到该极值就算通过
 
@@ -126,6 +126,7 @@
 - 该品种刚刚强止损或弱止损，仍处于 `InpStopObservationBars` 定义的观察窗口内
 - 当前候选与“已经成功开过仓的历史骨架”共享同角色的 `P0/P1/P2/P3` 任一点
 - 当前由本 EA 管理的该品种持仓数已经达到 `InpMaxPositionsPerSymbol`
+- 当前品种“已实现盈亏 + 浮动盈亏”的总结果达到 `InpMaxProfitStopMoney`，或当前品种总亏损额度达到 `InpMaxLossStopMoney`
 - 多头方向下当前 `bid` 已经低于强止损价，或已高于激活后的止盈位
 - 空头方向下当前 `ask` 已经高于强止损价，或已低于激活后的止盈位
 
@@ -190,7 +191,7 @@
 - 多头：`profitPrice = selectedP5 + InpP5AnchoredProfitC * (a + b1 + b2)`
 - 空头：`profitPrice = selectedP5 - InpP5AnchoredProfitC * (a + b1 + b2)`
 
-默认 `InpP5AnchoredProfitC = 1.0`。
+默认 `InpP5AnchoredProfitC = 2.0`。
 
 一旦首次激活完成，这两个价位会被冻结，后续即使再出现新的 `P5/P6` 组合，也不会继续改写。
 
@@ -217,7 +218,7 @@
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
 | `InpSymbols` | `"XAUUSD"` | 要扫描的品种列表，分号分隔 | `OnTimer()` 逐个轮询 |
-| `InpTF` | `PERIOD_M10` | 形态识别周期 | 所有 K 线和时间跨度都基于该周期 |
+| `InpTF` | `PERIOD_M30` | 形态识别周期 | 所有 K 线和时间跨度都基于该周期 |
 | `InpTimerMillSec` | `100` | 定时器轮询间隔，毫秒 | 控制扫描频率 |
 | `InpMagic` | `9527001` | EA 魔术号 | 用来识别本 EA 的持仓 |
 | `InpComment` | `"P4PatternStrategy"` | 订单备注前缀 | 用于识别和日志追踪 |
@@ -227,9 +228,11 @@
 | `InpSlippagePoints` | `20` | 允许的价格偏差点数 | 用于交易请求的成交偏差控制 |
 | `InpProfitObservationBars` | `10` | 止盈后观察窗口 bar 数 | 观察期内阻止新开仓 |
 | `InpStopObservationBars` | `10` | 止损后观察窗口 bar 数 | `hard_stop` 或 `soft_stop` 后观察期内阻止新开仓 |
-| `InpLookbackBars` | `300` | 回看已收盘 K 线数量 | 限制历史骨架搜索范围 |
-| `InpAdjustPointMinSpanKNumber` | `3` | 相邻点之间最少中间 K 线数 | 限制 `P0-P4` 各段跨度下限 |
-| `InpAdjustPointMaxSpanKNumber` | `35` | 相邻点之间最多中间 K 线数 | 限制 `P0-P4` 各段跨度上限 |
+| `InpMaxProfitStopMoney` | `0.0` | 当前品种运行期最大盈利停止阈值，账户货币 | `>0` 时，若该品种“已实现盈亏 + 浮动盈亏”的总净收益达到该值，则立即平掉该品种全部受管仓位并停止该品种继续开新仓 |
+| `InpMaxLossStopMoney` | `0.0` | 当前品种运行期最大亏损停止阈值，账户货币 | `>0` 时，若该品种“已实现盈亏 + 浮动盈亏”的总亏损额度达到该值，则立即平掉该品种全部受管仓位并停止该品种继续开新仓 |
+| `InpLookbackBars` | `150` | 回看已收盘 K 线数量 | 限制历史骨架搜索范围 |
+| `InpAdjustPointMinSpanKNumber` | `0` | 相邻点之间最少中间 K 线数 | 限制 `P0-P4` 各段跨度下限 |
+| `InpAdjustPointMaxSpanKNumber` | `20` | 相邻点之间最多中间 K 线数 | 限制 `P0-P4` 各段跨度上限 |
 
 ### 历史骨架过滤参数
 
@@ -237,15 +240,15 @@
 | --- | --- | --- | --- |
 | `InpCondAXMin` | `0.75` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
 | `InpCondAXMax` | `1.25` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
-| `InpP1P2AValueSpaceMinPriceLimit` | `0.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
-| `InpP1P2AValueTimeMinKNumberLimit` | `1` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
+| `InpP1P2AValueSpaceMinPriceLimit` | `5.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
+| `InpP1P2AValueTimeMinKNumberLimit` | `5` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
 | `InpBSumValueMinRatioOfAValue` | `2.0` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
-| `InpBSumValueMaxRatioOfAValue` | `10.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
-| `InpPreCondEnable` | `false` | 是否启用 `Pre0` 前置 move 条件 | 关闭时跳过 `Pre0` 搜索与过滤，也不画 `Pre0` 标注 |
-| `InpPreCondPriorMoveLookbackBars` | `30` | `Pre0` 前置 move 回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
-| `InpPreCondPriorMoveMinRatioOfStructure` | `0.45` | `Pre0->P0` 最小方向性 move 系数 | 要求方向性 move `> 该值 * (a+b1)` |
+| `InpBSumValueMaxRatioOfAValue` | `5.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
+| `InpPreCondEnable` | `true` | 是否启用 `Pre0` 前置 move 条件 | 关闭时跳过 `Pre0` 搜索与过滤，也不画 `Pre0` 标注 |
+| `InpPreCondPriorMoveLookbackBars` | `20` | `Pre0` 前置 move 回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
+| `InpPreCondPriorMoveMinRatioOfStructure` | `0.45` | `Pre0->P0` 最小方向性 move 系数 | 要求方向性 move `> 该值 * (a+b1+b2)` |
 | `InpPreCondPriorMoveMinBarsBetweenPre0AndP0` | `0` | `Pre0` 与 `P0` 最少间隔 bar 数 | 约束前置 move 与骨架之间的距离 |
-| `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` | `"true,true,true,true,true"` | 相邻段整段极值开关 | 顺序固定为 `Pre0P0/P0P1/P1P2/P2P3/P3P4`；前四位控制对应线段两个端点，`P3P4` 只控制 `P3` |
+| `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` | `"false,false,false,false,false"` | 相邻段整段极值开关 | 顺序固定为 `Pre0P0/P0P1/P1P2/P2P3/P3P4`；前四位控制对应线段两个端点，`P3P4` 只控制 `P3` |
 
 ### 实时触发与出场参数
 
@@ -255,7 +258,7 @@
 | `InpCondCZ` | `1.0` | `CondC` 系数 | 要求 `t4 < 该值 * (t1+t2+t3)` |
 | `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.55` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
 | `InpSoftLossC` | `1.0` | 弱止损价系数 | `softLossPrice = 该值 * selectedP5` |
-| `InpP5AnchoredProfitC` | `1.0` | 唯一止盈系数 | 首次 `P5/P6` 激活后，多头加到 `selectedP5`，空头从 `selectedP5` 向下减去 |
+| `InpP5AnchoredProfitC` | `2.0` | 唯一止盈系数 | 首次 `P5/P6` 激活后，多头加到 `selectedP5`，空头从 `selectedP5` 向下减去 |
 | `InpEnableExactSearchCompare` | `false` | 调试开关 | 打开后会对比缓存搜索和精确搜索结果，仅用于诊断 |
 
 ## 当前实现与最初 PRD 的主要差异
@@ -272,8 +275,35 @@
 - 首次 `P5/P6` 激活后，多头基于最低合格 `P5`，空头基于最高合格 `P5`
 - 弱止损激活条件改为 `e >= 阈值 * (c+d)`
 - 止盈后和止损后都有独立观察窗口，且任一窗口有效时都禁止新开仓
+- 运行期 stop 改为按品种统计“已实现盈亏 + 浮动盈亏”；达到阈值后会立即平掉当前品种全部受管仓位，并停止该品种后续自动开仓
 
 如果你要调参，建议先按“当前代码公式”理解，不要直接沿用最初 PRD 里的旧公式。
+
+## 运行期已实现盈亏停止门控
+
+如果启用 `InpMaxProfitStopMoney` 或 `InpMaxLossStopMoney`，策略会为每个配置品种分别维护一组运行期金额统计：
+
+- `gross_realized_profit_money`：该品种所有已闭仓正收益金额之和
+- `gross_realized_loss_money`：该品种所有已闭仓负收益绝对值之和
+- `net_realized_money = gross_realized_profit_money - gross_realized_loss_money`
+- `floating_money`：该品种当前所有受管未平仓仓位的实时浮动金额
+- `total_net_money = net_realized_money + floating_money`
+
+这里的已实现部分口径是账户货币，并按本 EA 自己成功关闭的该品种交易结果统计；当前实现会把平仓后的真实 `profit + swap + commission` 计入已实现累计值。浮动部分则来自该品种当前未平仓受管仓位的实时金额，当前实现按 `profit + swap + commission` 口径累计。
+
+当：
+
+- `InpMaxProfitStopMoney > 0` 且 `total_net_money >= InpMaxProfitStopMoney`
+- 或 `InpMaxLossStopMoney > 0` 且 `-total_net_money >= InpMaxLossStopMoney`
+
+策略会触发当前品种的 stop。触发后：
+
+- 立即尝试平掉该品种全部由本 EA 管理的未平仓仓位
+- 本次运行剩余时间内，不再为该品种发出新的自动开仓
+- 其他未触发 stop 的配置品种仍继续按原逻辑运行
+- 该品种 stopped 状态在本次运行内不会自动恢复
+
+默认 `InpMaxProfitStopMoney = 0.0`、`InpMaxLossStopMoney = 0.0`，表示对应阈值关闭。
 
 ## 日志怎么看
 
@@ -284,6 +314,8 @@
 - `annotation=drawn`：表示策略已在一个已打开且匹配 `symbol + InpTF` 的图表上画出该次入场的模式对象；如果后续首次出现合格 `P5/P6`，同一组对象会继续补画
 - `annotation=no_matching_chart`：表示本次入场成功，但当前没有打开匹配的图表，所以没有绘图
 - `annotation=draw_failed`：表示交易成功，但图形对象创建失败；不会影响持仓管理
+- 运行期停止日志 `RUNTIME_STOP`：当某个品种的 `total_net_money` 达到 `InpMaxProfitStopMoney`，或该品种总亏损额度达到 `InpMaxLossStopMoney` 时，只打印一次该品种的停止原因和触发时刻
+- 运行期停止摘要 `RUNTIME_STOP_SUMMARY`：与 `RUNTIME_STOP` 同时只打印一次，输出该品种的 `gross_realized_profit_money`、`gross_realized_loss_money`、`net_realized_money`、`floating_money`、`total_net_money`、阈值配置，以及当时的 `matched_patterns`、`closed_trades`、`winning_trades`、`losing_trades`
 
 默认不再打印常规阻止日志和例行 `EXIT` 摘要，因此 Experts 输出会明显更短，更适合直接盯入场和 `P5/P6` 激活。
 

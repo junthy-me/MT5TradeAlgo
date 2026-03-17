@@ -1,0 +1,23 @@
+# OS / editor noise
+.DS_Store
+.vscode/
+.idea/
+
+# Local machine state
+settings.dat
+msedgewebview2.dxvk-cache
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# MT5 build artifacts
+mt5/*.ex5
+
+# Backtest logs, reports, and exported data
+*.log
+*.report
+*.htm
+*.html
+*.xml
+*.csv
