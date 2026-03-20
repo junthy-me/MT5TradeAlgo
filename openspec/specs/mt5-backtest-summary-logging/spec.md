@@ -11,7 +11,7 @@ The strategy SHALL emit a single structured `回测总结` log line when a backt
 - **THEN** it prints one `回测总结` log line for that run
 
 ### Requirement: Backtest summary includes return and pattern outcome metrics
-The `回测总结` log line SHALL include, at minimum, the Chinese-labeled fields `初始资金`, `结束资金`, `总收益率`, `模式匹配次数`, `已闭仓笔数`, `盈利笔数`, `亏损笔数`, and `模式匹配胜率`. The strategy MAY include additional summary fields such as `净点数`, `平局笔数`, `闭仓胜率`, or `盈亏比`, but the required core fields SHALL remain stable. Percentage fields in the printed summary SHALL include a trailing `%` sign.
+The `回测总结` log line SHALL include, at minimum, the Chinese-labeled fields `初始资金`, `结束资金`, `总收益率`, `模式匹配次数`, `已闭仓笔数`, `盈利笔数`, `亏损笔数`, and `模式匹配胜率`. The strategy MAY include additional summary fields such as `净点数`, `平局笔数`, `闭仓胜率`, or `盈亏比`, but the required core fields SHALL remain stable. Percentage fields in the printed summary SHALL include a trailing `%` sign. When the optional fields `最大回撤` and `最大回撤率` are present, they SHALL be measured from the initial balance down to the lowest observed account equity during the backtest, including floating PnL.
 
 #### Scenario: User reviews business metrics at the end of a run
 - **WHEN** a tester run finishes
@@ -30,4 +30,3 @@ The strategy SHALL define `总收益率` using the formula `((final_balance - in
 #### Scenario: Summary reports return consistently across parameter sets
 - **WHEN** two tester runs start with the same initial deposit but finish with different balances
 - **THEN** each summary reports `总收益率` from the same balance-based formula
-

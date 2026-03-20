@@ -32,7 +32,7 @@ enum SwingExtremaSegmentIndex
    SWING_EXTREMA_SEGMENT_P3P4 = 4
   };
 
-input string InpSymbols = "XAUUSD";
+input string InpSymbols = "XAUUSDm";
 input ENUM_TIMEFRAMES InpTF = PERIOD_M30;
 input int InpTimerMillSec = 100;
 input long InpMagic = 9527001;
@@ -51,7 +51,7 @@ input int InpAdjustPointMaxSpanKNumber = 20;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
-input double InpP3P4MoveMinRatioOfStructure = 0.44;
+input double InpP3P4MoveMinRatioOfStructure = 0.75;
 input double InpCondCZ = 1.0;
 input double InpP1P2AValueSpaceMinPriceLimit = 5.0;
 input int InpP1P2AValueTimeMinKNumberLimit = 5;
@@ -59,10 +59,10 @@ input double InpBSumValueMinRatioOfAValue = 2.0;
 input double InpBSumValueMaxRatioOfAValue = 5.0;
 input ENUM_TRADE_DIRECTION_MODE InpTradeDirectionMode = LONG_ONLY;
 input bool InpPreCondEnable = true;
-input int InpPreCondPriorMoveLookbackBars = 20;
-input double InpPreCondPriorMoveMinRatioOfStructure = 0.45;
+input int InpPreCondPriorMoveLookbackBars = 30;
+input double InpPreCondPriorMoveMinRatioOfStructure = 1.1;
 input int InpPreCondPriorMoveMinBarsBetweenPre0AndP0 = 0;
-input string InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4 = "false,false,false,false,false";
+input string InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4 = "true,true,false,false,false";
 
 input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.55;
 input double InpSoftLossC = 1.0;
@@ -204,6 +204,9 @@ struct BacktestSummaryState
   {
    double            initialBalance;
    double            finalBalance;
+   double            lowestEquity;
+   double            maxDrawdownMoney;
+   double            maxDrawdownPct;
    int               matchedPatterns;
    int               closedTrades;
    int               winningTrades;
@@ -301,9 +304,11 @@ void OnTick()
 
 void OnTimer()
   {
+   UpdateBacktestDrawdown();
    const int symbolCount = ArraySize(g_symbols);
    for(int i = 0; i < symbolCount; ++i)
       ProcessSymbol(g_symbols[i]);
+   UpdateBacktestDrawdown();
   }
 
 bool ValidateInputs()
@@ -704,6 +709,9 @@ void ResetBacktestSummary()
   {
    g_backtestSummary.initialBalance = 0.0;
    g_backtestSummary.finalBalance = 0.0;
+   g_backtestSummary.lowestEquity = 0.0;
+   g_backtestSummary.maxDrawdownMoney = 0.0;
+   g_backtestSummary.maxDrawdownPct = 0.0;
    g_backtestSummary.matchedPatterns = 0;
    g_backtestSummary.closedTrades = 0;
    g_backtestSummary.winningTrades = 0;
@@ -730,6 +738,32 @@ void InitializeBacktestSummary()
    ResetBacktestSummary();
    g_backtestSummary.initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    g_backtestSummary.finalBalance = g_backtestSummary.initialBalance;
+   g_backtestSummary.lowestEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(g_backtestSummary.lowestEquity <= 0.0)
+      g_backtestSummary.lowestEquity = g_backtestSummary.initialBalance;
+  }
+
+void UpdateBacktestDrawdown()
+  {
+   const double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(currentEquity <= 0.0)
+      return;
+
+   if(g_backtestSummary.lowestEquity <= 0.0 || currentEquity < g_backtestSummary.lowestEquity)
+      g_backtestSummary.lowestEquity = currentEquity;
+
+   if(g_backtestSummary.initialBalance <= 0.0)
+      return;
+
+   const double drawdownMoney = g_backtestSummary.initialBalance - currentEquity;
+   if(drawdownMoney <= 0.0)
+      return;
+
+   const double drawdownPct = (drawdownMoney / g_backtestSummary.initialBalance) * 100.0;
+   if(drawdownMoney > g_backtestSummary.maxDrawdownMoney)
+      g_backtestSummary.maxDrawdownMoney = drawdownMoney;
+   if(drawdownPct > g_backtestSummary.maxDrawdownPct)
+      g_backtestSummary.maxDrawdownPct = drawdownPct;
   }
 
 void RecordMatchedPattern()
@@ -1009,7 +1043,8 @@ bool IsRuntimeEntryStopActive(const SymbolRuntimeState &state)
 void EmitBacktestSummary()
   {
    g_backtestSummary.finalBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   PrintFormat("回测总结 品种=%s 周期=%s 初始资金=%.2f 结束资金=%.2f 总收益率=%s 模式匹配次数=%d 已闭仓笔数=%d 盈利笔数=%d 亏损笔数=%d 平局笔数=%d 模式匹配胜率=%s 闭仓胜率=%s 净点数=%.5f 盈亏比=%s",
+   UpdateBacktestDrawdown();
+   PrintFormat("回测总结 品种=%s 周期=%s 初始资金=%.2f 结束资金=%.2f 总收益率=%s 模式匹配次数=%d 已闭仓笔数=%d 盈利笔数=%d 亏损笔数=%d 平局笔数=%d 模式匹配胜率=%s 闭仓胜率=%s 净点数=%.5f 盈亏比=%s 最大回撤=%.2f 最大回撤率=%s",
                InpSymbols,
                EnumToString(InpTF),
                g_backtestSummary.initialBalance,
@@ -1023,7 +1058,9 @@ void EmitBacktestSummary()
                FormatPercentValue(CalculatePatternMatchWinRatePct()),
                FormatPercentValue(CalculateClosedTradeWinRatePct()),
                g_backtestSummary.netPoints,
-               FormatProfitFactorValue());
+               FormatProfitFactorValue(),
+               g_backtestSummary.maxDrawdownMoney,
+               FormatPercentValue(g_backtestSummary.maxDrawdownPct));
   }
 
 bool IsDirectionEnabled(const PatternDirection direction)

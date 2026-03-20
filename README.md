@@ -70,7 +70,7 @@
 - 多头：`P1 > P0`、`P2 > P0`、`P2 < P1`、`P3 > P1`
 - 空头：`P1 < P0`、`P2 < P0`、`P2 > P1`、`P3 < P1`
 
-除了这些点位关系，历史骨架现在还必须满足“端点就是该段极值”的线段约束，且默认允许并列极值。这些约束由 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 控制，当前默认值为 `"false,false,false,false,false"`：
+除了这些点位关系，历史骨架现在还必须满足“端点就是该段极值”的线段约束，且默认允许并列极值。这些约束由 `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` 控制，当前默认值为 `"true,true,false,false,false"`：
 
 - `Pre0P0`：控制 `Pre0 -> P0` 段是否要求两个端点达到该段极值
 - `P0P1`、`P1P2`、`P2P3`：分别控制对应历史骨架段是否要求两个端点达到该段极值
@@ -217,7 +217,7 @@
 
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
-| `InpSymbols` | `"XAUUSD"` | 要扫描的品种列表，分号分隔 | `OnTimer()` 逐个轮询 |
+| `InpSymbols` | `"XAUUSDm"` | 要扫描的品种列表，分号分隔 | `OnTimer()` 逐个轮询 |
 | `InpTF` | `PERIOD_M30` | 形态识别周期 | 所有 K 线和时间跨度都基于该周期 |
 | `InpTimerMillSec` | `100` | 定时器轮询间隔，毫秒 | 控制扫描频率 |
 | `InpMagic` | `9527001` | EA 魔术号 | 用来识别本 EA 的持仓 |
@@ -245,16 +245,16 @@
 | `InpBSumValueMinRatioOfAValue` | `2.0` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
 | `InpBSumValueMaxRatioOfAValue` | `5.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
 | `InpPreCondEnable` | `true` | 是否启用 `Pre0` 前置 move 条件 | 关闭时跳过 `Pre0` 搜索与过滤，也不画 `Pre0` 标注 |
-| `InpPreCondPriorMoveLookbackBars` | `20` | `Pre0` 前置 move 回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
-| `InpPreCondPriorMoveMinRatioOfStructure` | `0.45` | `Pre0->P0` 最小方向性 move 系数 | 要求方向性 move `> 该值 * (a+b1+b2)` |
+| `InpPreCondPriorMoveLookbackBars` | `30` | `Pre0` 前置 move 回看窗口 | 在 `P0` 之前多少根 K 线内寻找 `Pre0` |
+| `InpPreCondPriorMoveMinRatioOfStructure` | `1.1` | `Pre0->P0` 最小方向性 move 系数 | 要求方向性 move `> 该值 * (a+b1+b2)` |
 | `InpPreCondPriorMoveMinBarsBetweenPre0AndP0` | `0` | `Pre0` 与 `P0` 最少间隔 bar 数 | 约束前置 move 与骨架之间的距离 |
-| `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` | `"false,false,false,false,false"` | 相邻段整段极值开关 | 顺序固定为 `Pre0P0/P0P1/P1P2/P2P3/P3P4`；前四位控制对应线段两个端点，`P3P4` 只控制 `P3` |
+| `InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4` | `"true,true,false,false,false"` | 相邻段整段极值开关 | 顺序固定为 `Pre0P0/P0P1/P1P2/P2P3/P3P4`；前四位控制对应线段两个端点，`P3P4` 只控制 `P3` |
 
 ### 实时触发与出场参数
 
 | 参数 | 默认值 | 含义 | 如何参与计算 |
 | --- | --- | --- | --- |
-| `InpP3P4MoveMinRatioOfStructure` | `0.44` | `CondB` 阈值 | 要求 `c / (a+b1+b2) >= 该值` |
+| `InpP3P4MoveMinRatioOfStructure` | `0.75` | `CondB` 阈值 | 要求 `c / (a+b1+b2) >= 该值` |
 | `InpCondCZ` | `1.0` | `CondC` 系数 | 要求 `t4 < 该值 * (t1+t2+t3)` |
 | `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.55` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
 | `InpSoftLossC` | `1.0` | 弱止损价系数 | `softLossPrice = 该值 * selectedP5` |
@@ -353,7 +353,7 @@
 3. 设置 `InpSymbols`、`InpTF`、`InpFixedLots` 等运行参数，确认目标品种已在 Market Watch 中可用。
 4. 如果想看图上模式，提前打开你关心品种且周期等于 `InpTF` 的图表。
 5. 打开 Experts / Journal，先确认初始化日志，再观察 `ENTRY_P4` 是否清楚列出 `P0-P4` 点位，并检查图表上是否出现对应的 `Pre0-P4`、高度值和强止损标注；若后续触发合格 `P5/P6`，再确认图上是否补出 `P5/P6` 和弱止损位。
-6. 实盘前先用 Strategy Tester 回测，重点检查止盈/止损观察窗口、共享骨架锁、多空共享的 `P4` bar 锁，以及首次 `P5/P6` 激活后多头最低 `P5` / 空头最高 `P5` 的选择是否符合预期；回测结束时再确认 Experts / Journal 中是否出现中文 `回测总结`，其中会打印总收益率、模式匹配次数、模式匹配胜率等汇总指标。
+6. 实盘前先用 Strategy Tester 回测，重点检查止盈/止损观察窗口、共享骨架锁、多空共享的 `P4` bar 锁，以及首次 `P5/P6` 激活后多头最低 `P5` / 空头最高 `P5` 的选择是否符合预期；回测结束时再确认 Experts / Journal 中是否出现中文 `回测总结`，其中会打印总收益率、模式匹配次数、模式匹配胜率等汇总指标。若 summary 中包含 `最大回撤`、`最大回撤率`，其口径为“初始本金相对回测期间最低净值的最大下探”，并包含浮动盈亏。
 
 ## 使用建议
 
