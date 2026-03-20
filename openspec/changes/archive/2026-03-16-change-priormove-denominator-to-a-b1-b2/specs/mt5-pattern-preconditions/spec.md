@@ -1,18 +1,4 @@
-# mt5-pattern-preconditions Specification
-
-## Purpose
-TBD - created by archiving change add-pre0-prior-decline-precondition. Update Purpose after archive.
-## Requirements
-### Requirement: 在形态确认前执行可扩展的先决条件模块
-策略 SHALL 在当前 `P0-P4` 候选被视为有效之前执行一个可扩展的 pattern preconditions 模块。该模块 SHALL 支持挂载多个独立规则，并以“所有启用规则都通过”为总通过条件。任一规则失败时，当前候选 SHALL 被视为无效，不得继续作为有效形态进入后续流程。
-
-#### Scenario: 所有启用规则通过时保留候选
-- **WHEN** 当前 `P0-P4` 候选通过了 pattern preconditions 模块中的所有启用规则
-- **THEN** 策略保留该候选，并允许其继续进入后续完整匹配流程
-
-#### Scenario: 任一启用规则失败时拒绝候选
-- **WHEN** 当前 `P0-P4` 候选在 pattern preconditions 模块中至少有一条启用规则失败
-- **THEN** 策略将该候选视为无效，且不会把它继续用于后续完整匹配或交易判断
+## MODIFIED Requirements
 
 ### Requirement: 支持 Pre0 到 P0 的前置下跌先决条件
 策略 SHALL 支持一个方向感知的 `PriorMove` 先决条件规则。对任一候选骨架，策略 SHALL 在 `P0` 之前最近 `InpPreCondPriorMoveLookbackBars` 根 K 线中搜索候选 `Pre0`，并要求 `Pre0` 与 `P0` 之间不包含端点的中间 K 线数量大于或等于 `InpPreCondPriorMoveMinBarsBetweenPre0AndP0`。对于多头候选，`Pre0` SHALL 取候选区间的最高点，并且仅当 `(Pre0High - P0Low) > InpPreCondPriorMoveMinRatioOfStructure * (a + b1 + b2)` 且 `Pre0->P0` 线段满足“`Pre0` 达到整段最高点、`P0` 达到整段最低点”时，该规则才视为通过。对于空头候选，`Pre0` SHALL 取候选区间的最低点，并且仅当 `(P0High - Pre0Low) > InpPreCondPriorMoveMinRatioOfStructure * (a + b1 + b2)` 且 `Pre0->P0` 线段满足“`Pre0` 达到整段最低点、`P0` 达到整段最高点”时，该规则才视为通过。若存在多个合格 `Pre0`，策略 SHALL 记录当前方向上 move 最强的那个结果。
@@ -32,4 +18,3 @@ TBD - created by archiving change add-pre0-prior-decline-precondition. Update Pu
 #### Scenario: 多个 Pre0 同时满足时记录当前方向上 move 最强的结果
 - **WHEN** 搜索窗口内存在多个 `Pre0` 都满足 `PriorMove` 规则
 - **THEN** 策略记录多头方向上最高的 `Pre0` 或空头方向上最低的 `Pre0` 作为该次规则命中的结果
-

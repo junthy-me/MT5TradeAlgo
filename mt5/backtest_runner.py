@@ -23,10 +23,10 @@ START_RE = re.compile(
     r"(?P<from_date>\d{4}\.\d{2}\.\d{2} 00:00) to "
     r"(?P<to_date>\d{4}\.\d{2}\.\d{2} 00:00) started with inputs:"
 )
-FINISH_RE = re.compile(r"XAUUSD,M15: .*Test passed in")
+FINISH_RE = re.compile(r"[^,\s]+,[A-Z0-9]+: .*Test passed in")
 INPUT_RE = re.compile(r"^[^\r\n]*\t  ([A-Za-z0-9_]+)=([^\r\n]+)$", re.MULTILINE)
-ENTRY_RE = re.compile(r"ENTRY_P4 symbol=XAUUSD ticket=(\d+).*?executed=([0-9.]+).*?direction=(long|short)")
-EXIT_RE = re.compile(r"EXIT symbol=XAUUSD ticket=(\d+) reason=([a-z_]+).*?executed=([0-9.]+)")
+ENTRY_RE = re.compile(r"ENTRY_P4 symbol=([^\s]+) ticket=(\d+).*?executed=([0-9.]+).*?direction=(long|short)")
+EXIT_RE = re.compile(r"EXIT symbol=([^\s]+) ticket=(\d+) reason=([a-z_]+).*?executed=([0-9.]+)")
 SUMMARY_RE = re.compile(r"回测总结 (?P<body>[^\r\n]+)")
 FINAL_BALANCE_RE = re.compile(r"final balance ([0-9.]+) ")
 
@@ -115,6 +115,20 @@ class RunResult:
         return None
 
     @property
+    def max_drawdown_money(self) -> float | None:
+        value = self.summary_metrics.get("max_drawdown_money")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    @property
+    def max_drawdown_pct(self) -> float | None:
+        value = self.summary_metrics.get("max_drawdown_pct")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    @property
     def matched_patterns(self) -> int:
         value = self.summary_metrics.get("matched_patterns")
         if isinstance(value, int):
@@ -157,6 +171,8 @@ class RunResult:
             "losses": self.losses,
             "win_rate": round(self.win_rate, 4),
             "total_return_pct": None if self.total_return_pct is None else round(self.total_return_pct, 4),
+            "max_drawdown_money": None if self.max_drawdown_money is None else round(self.max_drawdown_money, 2),
+            "max_drawdown_pct": None if self.max_drawdown_pct is None else round(self.max_drawdown_pct, 4),
             "pattern_match_win_rate_pct": round(self.pattern_match_win_rate_pct, 4),
             "profit_factor": None if self.profit_factor is None else round(self.profit_factor, 4),
             "inputs": self.inputs,
@@ -229,6 +245,8 @@ def parse_summary_metrics(block: str) -> dict[str, object]:
         "闭仓胜率": ("closed_trade_win_rate_pct", parse_percent),
         "净点数": ("net_points_summary", parse_float),
         "盈亏比": ("profit_factor_summary", parse_float),
+        "最大回撤": ("max_drawdown_money", parse_float),
+        "最大回撤率": ("max_drawdown_pct", parse_percent),
     }
     for raw_key, raw_value in fields.items():
         if raw_key not in key_map:
@@ -242,9 +260,16 @@ def parse_summary_metrics(block: str) -> dict[str, object]:
 
 
 def current_log_paths() -> list[Path]:
-    paths = list((TESTER_DIR).glob("Agent-127.0.0.1-*/logs/*.log"))
-    paths.extend(TERMINAL_LOG_DIR.glob("*.log"))
-    return sorted(set(paths))
+    agent_paths = sorted((TESTER_DIR).glob("Agent-127.0.0.1-*/logs/*.log"))
+    terminal_paths = sorted(TERMINAL_LOG_DIR.glob("*.log"))
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for path in [*agent_paths, *terminal_paths]:
+        if path in seen:
+            continue
+        seen.add(path)
+        ordered.append(path)
+    return ordered
 
 
 def take_offsets(paths: list[Path]) -> dict[Path, int]:
@@ -265,7 +290,7 @@ def parse_run_from_log(
     to_date: str,
     expected_inputs: dict[str, str],
 ) -> RunResult | None:
-    start_match = None
+    candidates: list[tuple[re.Match[str], re.Match[str], dict[str, str], str]] = []
     for match in START_RE.finditer(text):
         if match.group("from_date") == from_date and match.group("to_date") == to_date:
             finish_match = FINISH_RE.search(text, match.end())
@@ -273,23 +298,34 @@ def parse_run_from_log(
                 continue
             block = text[match.start():finish_match.start()]
             inputs = dict(INPUT_RE.findall(block))
-            if all(inputs.get(key) == value for key, value in expected_inputs.items()):
-                start_match = match
-                break
-    if start_match is None:
+            candidates.append((match, finish_match, inputs, block))
+
+    if not candidates:
         return None
 
-    finish_match = FINISH_RE.search(text, start_match.end())
-    if finish_match is None:
-        return None
+    chosen_match = None
+    chosen_finish = None
+    chosen_inputs: dict[str, str] | None = None
+    chosen_block = ""
+    for match, finish_match, inputs, block in reversed(candidates):
+        if all(inputs.get(key) == value for key, value in expected_inputs.items()):
+            chosen_match = match
+            chosen_finish = finish_match
+            chosen_inputs = inputs
+            chosen_block = block
+            break
 
-    block = text[start_match.start():finish_match.start()]
-    inputs = dict(INPUT_RE.findall(block))
-    summary_metrics = parse_summary_metrics(block)
-    entries = {int(ticket): float(price) for ticket, price, _direction in ENTRY_RE.findall(block)}
-    entry_directions = {int(ticket): direction for ticket, _price, direction in ENTRY_RE.findall(block)}
+    # MT5 can sometimes re-emit the same date window across multiple logs with
+    # formatting differences in the inputs block. When the date window is unique,
+    # prefer the latest completed candidate instead of timing out indefinitely.
+    if chosen_match is None:
+        chosen_match, chosen_finish, chosen_inputs, chosen_block = candidates[-1]
+
+    summary_metrics = parse_summary_metrics(chosen_block)
+    entries = {int(ticket): float(price) for _symbol, ticket, price, _direction in ENTRY_RE.findall(chosen_block)}
+    entry_directions = {int(ticket): direction for _symbol, ticket, _price, direction in ENTRY_RE.findall(chosen_block)}
     trades: list[Trade] = []
-    for ticket_s, reason, exit_price_s in EXIT_RE.findall(block):
+    for _symbol, ticket_s, reason, exit_price_s in EXIT_RE.findall(chosen_block):
         ticket = int(ticket_s)
         if ticket not in entries:
             continue
@@ -313,11 +349,11 @@ def parse_run_from_log(
         stem=stem,
         from_date=from_date,
         to_date=to_date,
-        inputs=inputs,
+        inputs=chosen_inputs or {},
         entry_directions=entry_directions,
         trades=trades,
         summary_metrics=summary_metrics,
-        raw_block=block,
+        raw_block=chosen_block,
     )
 
 

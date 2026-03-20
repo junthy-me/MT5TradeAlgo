@@ -32,8 +32,8 @@ enum SwingExtremaSegmentIndex
    SWING_EXTREMA_SEGMENT_P3P4 = 4
   };
 
-input string InpSymbols = "XAUUSD";
-input ENUM_TIMEFRAMES InpTF = PERIOD_M10;
+input string InpSymbols = "XAUUSDm";
+input ENUM_TIMEFRAMES InpTF = PERIOD_M30;
 input int InpTimerMillSec = 100;
 input long InpMagic = 9527001;
 input string InpComment = "P4PatternStrategy";
@@ -43,28 +43,30 @@ input int InpMaxPositionsPerSymbol = 1;
 input int InpSlippagePoints = 20;
 input int InpProfitObservationBars = 10;
 input int InpStopObservationBars = 10;
-input int InpLookbackBars = 300;
-input int InpAdjustPointMinSpanKNumber = 3;
-input int InpAdjustPointMaxSpanKNumber = 35;
+input double InpMaxProfitStopMoney = 0.0;
+input double InpMaxLossStopMoney = 0.0;
+input int InpLookbackBars = 150;
+input int InpAdjustPointMinSpanKNumber = 0;
+input int InpAdjustPointMaxSpanKNumber = 20;
 
 input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
-input double InpP3P4MoveMinRatioOfStructure = 0.44;
+input double InpP3P4MoveMinRatioOfStructure = 0.75;
 input double InpCondCZ = 1.0;
-input double InpP1P2AValueSpaceMinPriceLimit = 0.0;
-input int InpP1P2AValueTimeMinKNumberLimit = 1;
+input double InpP1P2AValueSpaceMinPriceLimit = 5.0;
+input int InpP1P2AValueTimeMinKNumberLimit = 5;
 input double InpBSumValueMinRatioOfAValue = 2.0;
-input double InpBSumValueMaxRatioOfAValue = 10.0;
+input double InpBSumValueMaxRatioOfAValue = 5.0;
 input ENUM_TRADE_DIRECTION_MODE InpTradeDirectionMode = LONG_ONLY;
-input bool InpPreCondEnable = false;
+input bool InpPreCondEnable = true;
 input int InpPreCondPriorMoveLookbackBars = 30;
-input double InpPreCondPriorMoveMinRatioOfStructure = 0.45;
+input double InpPreCondPriorMoveMinRatioOfStructure = 1.1;
 input int InpPreCondPriorMoveMinBarsBetweenPre0AndP0 = 0;
-input string InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4 = "true,true,true,true,true";
+input string InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4 = "true,true,false,false,false";
 
 input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.55;
 input double InpSoftLossC = 1.0;
-input double InpP5AnchoredProfitC = 1.0;
+input double InpP5AnchoredProfitC = 2.0;
 input bool InpEnableExactSearchCompare = false;
 
 struct PatternSnapshot
@@ -115,6 +117,24 @@ struct BackboneSuccessState
    datetime          successfulP4BarTime;
   };
 
+enum RuntimeStopReason
+  {
+   RUNTIME_STOP_REASON_NONE = 0,
+   RUNTIME_STOP_REASON_MAX_PROFIT = 1,
+   RUNTIME_STOP_REASON_MAX_LOSS = 2
+  };
+
+struct RuntimeStopState
+  {
+   double            grossRealizedProfitMoney;
+   double            grossRealizedLossMoney;
+   double            netRealizedMoney;
+   bool              stopTriggered;
+   RuntimeStopReason reason;
+   datetime          triggeredAt;
+   bool              stopSummaryEmitted;
+  };
+
 struct SymbolRuntimeState
   {
    string            symbol;
@@ -132,6 +152,7 @@ struct SymbolRuntimeState
    datetime          lastSuccessfulEntryBarTime;
    datetime          lastProfitTargetExitBarTime;
    datetime          lastStopExitBarTime;
+   RuntimeStopState  runtimeStop;
    int               backboneSuccessCount;
    BackboneSuccessState backboneSuccesses[];
   };
@@ -183,6 +204,9 @@ struct BacktestSummaryState
   {
    double            initialBalance;
    double            finalBalance;
+   double            lowestEquity;
+   double            maxDrawdownMoney;
+   double            maxDrawdownPct;
    int               matchedPatterns;
    int               closedTrades;
    int               winningTrades;
@@ -280,9 +304,11 @@ void OnTick()
 
 void OnTimer()
   {
+   UpdateBacktestDrawdown();
    const int symbolCount = ArraySize(g_symbols);
    for(int i = 0; i < symbolCount; ++i)
       ProcessSymbol(g_symbols[i]);
+   UpdateBacktestDrawdown();
   }
 
 bool ValidateInputs()
@@ -314,6 +340,18 @@ bool ValidateInputs()
    if(InpStopObservationBars < 0)
      {
       Print("InpStopObservationBars must be greater than or equal to 0.");
+      return(false);
+     }
+
+   if(InpMaxProfitStopMoney < 0.0)
+     {
+      Print("InpMaxProfitStopMoney must be greater than or equal to 0.");
+      return(false);
+     }
+
+   if(InpMaxLossStopMoney < 0.0)
+     {
+      Print("InpMaxLossStopMoney must be greater than or equal to 0.");
       return(false);
      }
 
@@ -543,7 +581,30 @@ void ProcessSymbol(const string symbol)
       return;
 
    CleanupPositionStates();
+
+   if(IsRuntimeEntryStopActive(g_symbolStates[stateIndex]))
+     {
+      CloseAllManagedPositionsForSymbol(g_symbolStates[stateIndex]);
+      return;
+     }
+
+   double floatingMoney = CalculateSymbolFloatingMoney(symbol);
+   double totalNetMoney = CalculateSymbolTotalNetMoney(g_symbolStates[stateIndex], floatingMoney);
+   if(EvaluateRuntimeStopThresholds(g_symbolStates[stateIndex], floatingMoney, totalNetMoney))
+     {
+      CloseAllManagedPositionsForSymbol(g_symbolStates[stateIndex]);
+      return;
+     }
+
    ManageOpenPositions(symbol);
+
+   floatingMoney = CalculateSymbolFloatingMoney(symbol);
+   totalNetMoney = CalculateSymbolTotalNetMoney(g_symbolStates[stateIndex], floatingMoney);
+   if(EvaluateRuntimeStopThresholds(g_symbolStates[stateIndex], floatingMoney, totalNetMoney))
+     {
+      CloseAllManagedPositionsForSymbol(g_symbolStates[stateIndex]);
+      return;
+     }
 
    PatternSnapshot match;
    if(!RefreshHistoricalCache(g_symbolStates[stateIndex]))
@@ -648,6 +709,9 @@ void ResetBacktestSummary()
   {
    g_backtestSummary.initialBalance = 0.0;
    g_backtestSummary.finalBalance = 0.0;
+   g_backtestSummary.lowestEquity = 0.0;
+   g_backtestSummary.maxDrawdownMoney = 0.0;
+   g_backtestSummary.maxDrawdownPct = 0.0;
    g_backtestSummary.matchedPatterns = 0;
    g_backtestSummary.closedTrades = 0;
    g_backtestSummary.winningTrades = 0;
@@ -658,11 +722,48 @@ void ResetBacktestSummary()
    g_backtestSummary.grossLossPoints = 0.0;
   }
 
+void ResetRuntimeStopState(RuntimeStopState &state)
+  {
+   state.grossRealizedProfitMoney = 0.0;
+   state.grossRealizedLossMoney = 0.0;
+   state.netRealizedMoney = 0.0;
+   state.stopTriggered = false;
+   state.reason = RUNTIME_STOP_REASON_NONE;
+   state.triggeredAt = 0;
+   state.stopSummaryEmitted = false;
+  }
+
 void InitializeBacktestSummary()
   {
    ResetBacktestSummary();
    g_backtestSummary.initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    g_backtestSummary.finalBalance = g_backtestSummary.initialBalance;
+   g_backtestSummary.lowestEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(g_backtestSummary.lowestEquity <= 0.0)
+      g_backtestSummary.lowestEquity = g_backtestSummary.initialBalance;
+  }
+
+void UpdateBacktestDrawdown()
+  {
+   const double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(currentEquity <= 0.0)
+      return;
+
+   if(g_backtestSummary.lowestEquity <= 0.0 || currentEquity < g_backtestSummary.lowestEquity)
+      g_backtestSummary.lowestEquity = currentEquity;
+
+   if(g_backtestSummary.initialBalance <= 0.0)
+      return;
+
+   const double drawdownMoney = g_backtestSummary.initialBalance - currentEquity;
+   if(drawdownMoney <= 0.0)
+      return;
+
+   const double drawdownPct = (drawdownMoney / g_backtestSummary.initialBalance) * 100.0;
+   if(drawdownMoney > g_backtestSummary.maxDrawdownMoney)
+      g_backtestSummary.maxDrawdownMoney = drawdownMoney;
+   if(drawdownPct > g_backtestSummary.maxDrawdownPct)
+      g_backtestSummary.maxDrawdownPct = drawdownPct;
   }
 
 void RecordMatchedPattern()
@@ -735,10 +836,215 @@ string FormatProfitFactorValue()
    return(StringFormat("%.2f", g_backtestSummary.grossProfitPoints / g_backtestSummary.grossLossPoints));
   }
 
+string RuntimeStopReasonToString(const RuntimeStopReason reason)
+  {
+   switch(reason)
+     {
+      case RUNTIME_STOP_REASON_MAX_PROFIT:
+         return("max_profit_threshold");
+      case RUNTIME_STOP_REASON_MAX_LOSS:
+         return("max_loss_threshold");
+     default:
+         return("none");
+     }
+  }
+
+string RuntimeStopCloseReason(const RuntimeStopReason reason)
+  {
+   switch(reason)
+     {
+      case RUNTIME_STOP_REASON_MAX_PROFIT:
+         return("runtime_max_profit_stop");
+      case RUNTIME_STOP_REASON_MAX_LOSS:
+         return("runtime_max_loss_stop");
+      default:
+         return("runtime_stop");
+     }
+  }
+
+double CalculateRuntimeLossMoney(const double totalNetMoney)
+  {
+   return(totalNetMoney < 0.0 ? MathAbs(totalNetMoney) : 0.0);
+  }
+
+double GetManagedPositionFloatingMoney()
+  {
+   return(PositionGetDouble(POSITION_PROFIT) +
+          PositionGetDouble(POSITION_SWAP) +
+          PositionGetDouble(POSITION_COMMISSION));
+  }
+
+double CalculateSymbolFloatingMoney(const string symbol)
+  {
+   double floatingMoney = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if(!IsManagedPosition(symbol))
+         continue;
+
+      floatingMoney += GetManagedPositionFloatingMoney();
+     }
+
+   return(floatingMoney);
+  }
+
+double CalculateSymbolTotalNetMoney(const SymbolRuntimeState &state, const double floatingMoney)
+  {
+   return(state.runtimeStop.netRealizedMoney + floatingMoney);
+  }
+
+void EmitRuntimeStopLogs(SymbolRuntimeState &state, const double floatingMoney, const double totalNetMoney)
+  {
+   if(!state.runtimeStop.stopTriggered || state.runtimeStop.stopSummaryEmitted)
+      return;
+
+   const string reason = RuntimeStopReasonToString(state.runtimeStop.reason);
+   PrintFormat("RUNTIME_STOP symbol=%s reason=%s triggered_at=%s gross_realized_profit_money=%.2f gross_realized_loss_money=%.2f net_realized_money=%.2f floating_money=%.2f total_net_money=%.2f profit_threshold=%.2f loss_threshold=%.2f",
+               state.symbol,
+               reason,
+               FormatTime(state.runtimeStop.triggeredAt),
+               state.runtimeStop.grossRealizedProfitMoney,
+               state.runtimeStop.grossRealizedLossMoney,
+               state.runtimeStop.netRealizedMoney,
+               floatingMoney,
+               totalNetMoney,
+               InpMaxProfitStopMoney,
+               InpMaxLossStopMoney);
+   PrintFormat("RUNTIME_STOP_SUMMARY symbol=%s reason=%s gross_realized_profit_money=%.2f gross_realized_loss_money=%.2f net_realized_money=%.2f floating_money=%.2f total_net_money=%.2f profit_threshold=%.2f loss_threshold=%.2f matched_patterns=%d closed_trades=%d winning_trades=%d losing_trades=%d",
+               state.symbol,
+               reason,
+               state.runtimeStop.grossRealizedProfitMoney,
+               state.runtimeStop.grossRealizedLossMoney,
+               state.runtimeStop.netRealizedMoney,
+               floatingMoney,
+               totalNetMoney,
+               InpMaxProfitStopMoney,
+               InpMaxLossStopMoney,
+               g_backtestSummary.matchedPatterns,
+               g_backtestSummary.closedTrades,
+               g_backtestSummary.winningTrades,
+               g_backtestSummary.losingTrades);
+   state.runtimeStop.stopSummaryEmitted = true;
+  }
+
+void TriggerRuntimeStop(SymbolRuntimeState &state,
+                        const RuntimeStopReason reason,
+                        const double floatingMoney,
+                        const double totalNetMoney)
+  {
+   if(state.runtimeStop.stopTriggered)
+      return;
+
+   state.runtimeStop.stopTriggered = true;
+   state.runtimeStop.reason = reason;
+   state.runtimeStop.triggeredAt = TimeCurrent();
+   EmitRuntimeStopLogs(state, floatingMoney, totalNetMoney);
+  }
+
+bool EvaluateRuntimeStopThresholds(SymbolRuntimeState &state,
+                                   const double floatingMoney,
+                                   const double totalNetMoney)
+  {
+   if(state.runtimeStop.stopTriggered)
+      return(true);
+
+   if(InpMaxProfitStopMoney > 0.0 &&
+      totalNetMoney >= InpMaxProfitStopMoney)
+     {
+      TriggerRuntimeStop(state, RUNTIME_STOP_REASON_MAX_PROFIT, floatingMoney, totalNetMoney);
+      return(true);
+     }
+
+   if(InpMaxLossStopMoney > 0.0 &&
+      CalculateRuntimeLossMoney(totalNetMoney) >= InpMaxLossStopMoney)
+     {
+      TriggerRuntimeStop(state, RUNTIME_STOP_REASON_MAX_LOSS, floatingMoney, totalNetMoney);
+      return(true);
+     }
+
+   return(false);
+  }
+
+void RecordClosedRealizedMoney(SymbolRuntimeState &state, const double pnlMoney)
+  {
+   if(pnlMoney > 0.0)
+      state.runtimeStop.grossRealizedProfitMoney += pnlMoney;
+   else if(pnlMoney < 0.0)
+      state.runtimeStop.grossRealizedLossMoney += MathAbs(pnlMoney);
+
+   state.runtimeStop.netRealizedMoney = state.runtimeStop.grossRealizedProfitMoney - state.runtimeStop.grossRealizedLossMoney;
+  }
+
+bool TryResolveClosedRealizedMoney(const long positionIdentifier,
+                                   const ulong resultOrder,
+                                   const ulong resultDeal,
+                                   double &pnlMoney)
+  {
+   pnlMoney = 0.0;
+
+   if(positionIdentifier > 0 && HistorySelectByPosition((ulong)positionIdentifier))
+     {
+      const int totalDeals = HistoryDealsTotal();
+      bool matchedAny = false;
+      for(int i = 0; i < totalDeals; ++i)
+        {
+         const ulong dealTicket = HistoryDealGetTicket(i);
+         if(dealTicket == 0)
+            continue;
+
+         if(resultOrder != 0)
+           {
+            const ulong dealOrder = (ulong)HistoryDealGetInteger(dealTicket, DEAL_ORDER);
+            if(dealOrder != resultOrder)
+               continue;
+           }
+         else if(resultDeal != 0 && dealTicket != resultDeal)
+            continue;
+
+         const long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+         if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY)
+            continue;
+
+         pnlMoney += HistoryDealGetDouble(dealTicket, DEAL_PROFIT) +
+                     HistoryDealGetDouble(dealTicket, DEAL_SWAP) +
+                     HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+         matchedAny = true;
+        }
+
+      if(matchedAny)
+         return(true);
+     }
+
+   if(resultDeal != 0)
+     {
+      const long dealEntry = HistoryDealGetInteger(resultDeal, DEAL_ENTRY);
+      if(dealEntry == DEAL_ENTRY_OUT || dealEntry == DEAL_ENTRY_OUT_BY)
+        {
+         pnlMoney = HistoryDealGetDouble(resultDeal, DEAL_PROFIT) +
+                    HistoryDealGetDouble(resultDeal, DEAL_SWAP) +
+                    HistoryDealGetDouble(resultDeal, DEAL_COMMISSION);
+         return(true);
+        }
+     }
+
+   return(false);
+  }
+
+bool IsRuntimeEntryStopActive(const SymbolRuntimeState &state)
+  {
+   return(state.runtimeStop.stopTriggered);
+  }
+
 void EmitBacktestSummary()
   {
    g_backtestSummary.finalBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   PrintFormat("回测总结 品种=%s 周期=%s 初始资金=%.2f 结束资金=%.2f 总收益率=%s 模式匹配次数=%d 已闭仓笔数=%d 盈利笔数=%d 亏损笔数=%d 平局笔数=%d 模式匹配胜率=%s 闭仓胜率=%s 净点数=%.5f 盈亏比=%s",
+   UpdateBacktestDrawdown();
+   PrintFormat("回测总结 品种=%s 周期=%s 初始资金=%.2f 结束资金=%.2f 总收益率=%s 模式匹配次数=%d 已闭仓笔数=%d 盈利笔数=%d 亏损笔数=%d 平局笔数=%d 模式匹配胜率=%s 闭仓胜率=%s 净点数=%.5f 盈亏比=%s 最大回撤=%.2f 最大回撤率=%s",
                InpSymbols,
                EnumToString(InpTF),
                g_backtestSummary.initialBalance,
@@ -752,7 +1058,9 @@ void EmitBacktestSummary()
                FormatPercentValue(CalculatePatternMatchWinRatePct()),
                FormatPercentValue(CalculateClosedTradeWinRatePct()),
                g_backtestSummary.netPoints,
-               FormatProfitFactorValue());
+               FormatProfitFactorValue(),
+               g_backtestSummary.maxDrawdownMoney,
+               FormatPercentValue(g_backtestSummary.maxDrawdownPct));
   }
 
 bool IsDirectionEnabled(const PatternDirection direction)
@@ -1497,6 +1805,7 @@ void ResetSymbolState(SymbolRuntimeState &state, const string symbol)
    state.lastSuccessfulEntryBarTime = 0;
    state.lastProfitTargetExitBarTime = 0;
    state.lastStopExitBarTime = 0;
+   ResetRuntimeStopState(state.runtimeStop);
    ResetBackboneSuccesses(state);
    ResetHistoryCache(state);
   }
@@ -1561,7 +1870,7 @@ bool EvaluatePriorMovePrecondition(MqlRates &rates[], PatternSnapshot &pattern)
    if(endIndex < startIndex)
       return(false);
 
-   const double structureValue = pattern.a + pattern.b1;
+   const double structureValue = pattern.a + pattern.b1 + pattern.b2;
    const double minRequiredMove = NormalizePrice(pattern.symbol,
                                                  InpPreCondPriorMoveMinRatioOfStructure * structureValue);
    int bestIndex = -1;
@@ -2482,6 +2791,9 @@ bool IsManagedPosition(const string symbolFilter)
 
 void ExecuteEntry(SymbolRuntimeState &state, PatternSnapshot &pattern)
   {
+   if(IsRuntimeEntryStopActive(state))
+      return;
+
    MqlTick tick;
    if(!SymbolInfoTick(pattern.symbol, tick))
       return;
@@ -2670,6 +2982,27 @@ void ManageOpenPositions(const string symbol)
      }
   }
 
+void CloseAllManagedPositionsForSymbol(SymbolRuntimeState &state)
+  {
+   if(!state.runtimeStop.stopTriggered)
+      return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(state.symbol, tick))
+      return;
+
+   const string closeReason = RuntimeStopCloseReason(state.runtimeStop.reason);
+   for(int i = ArraySize(g_positionStates) - 1; i >= 0; --i)
+     {
+      if(!g_positionStates[i].active || g_positionStates[i].symbol != state.symbol)
+         continue;
+
+      const double triggerPrice = NormalizePrice(state.symbol,
+                                                 GetManagedReferencePrice(g_positionStates[i].snapshot.direction, tick));
+      CloseManagedPosition(i, closeReason, triggerPrice);
+     }
+  }
+
 void UpdateSoftStopState(ManagedPositionState &state, const MqlTick &tick)
   {
    if(state.p5ActivationFrozen)
@@ -2729,6 +3062,7 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
      }
 
    const double entryPrice = NormalizePrice(symbol, PositionGetDouble(POSITION_PRICE_OPEN));
+   const long positionIdentifier = PositionGetInteger(POSITION_IDENTIFIER);
 
    if(!trade.PositionClose(ticket, InpSlippagePoints))
      {
@@ -2745,10 +3079,27 @@ void CloseManagedPosition(const int stateIndex, const string reason, const doubl
    if(executedPrice <= 0.0)
       executedPrice = triggerPrice;
    executedPrice = NormalizePrice(symbol, executedPrice);
+   const ulong resultOrder = trade.ResultOrder();
+   const ulong resultDeal = trade.ResultDeal();
 
    const double pnlPoints = GetDirectionalPnlPoints(direction, entryPrice, executedPrice);
    RecordClosedMatch(pnlPoints);
+   double realizedMoney = 0.0;
+   const bool resolvedMoney = TryResolveClosedRealizedMoney(positionIdentifier, resultOrder, resultDeal, realizedMoney);
    LogExit(g_positionStates[stateIndex].snapshot, ticket, reason, triggerPrice, entryPrice, executedPrice, pnlPoints);
+   if(resolvedMoney)
+     {
+      const int symbolStateIndex = FindSymbolState(symbol);
+      if(symbolStateIndex >= 0)
+         RecordClosedRealizedMoney(g_symbolStates[symbolStateIndex], realizedMoney);
+     }
+   else
+      PrintFormat("RUNTIME_STOP_PNL_UNRESOLVED symbol=%s ticket=%I64u reason=%s order=%I64u deal=%I64u",
+                  symbol,
+                  ticket,
+                  reason,
+                  resultOrder,
+                  resultDeal);
 
    if(reason == "profit_target" || reason == "hard_stop" || reason == "soft_stop")
      {
