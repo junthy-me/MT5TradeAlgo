@@ -208,6 +208,13 @@ def read_utf16(path: Path) -> str:
     return path.read_bytes().decode("utf-16le", errors="ignore")
 
 
+def read_utf16_from_offset(path: Path, offset: int) -> str:
+    raw = path.read_bytes()
+    if offset < 0 or offset > len(raw):
+        offset = 0
+    return raw[offset:].decode("utf-16le", errors="ignore")
+
+
 def parse_summary_metrics(block: str) -> dict[str, object]:
     matches = list(SUMMARY_RE.finditer(block))
     if not matches:
@@ -363,13 +370,14 @@ def wait_for_result(
     to_date: str,
     timeout_seconds: int,
     expected_inputs: dict[str, str],
+    offsets: dict[Path, int],
 ) -> RunResult:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         all_paths = current_log_paths()
         for path in all_paths:
             try:
-                text = read_utf16(path)
+                text = read_utf16_from_offset(path, offsets.get(path, 0))
             except Exception:
                 continue
             result = parse_run_from_log(path, text, stem, from_date, to_date, expected_inputs)
@@ -408,8 +416,9 @@ def main() -> int:
     args = parser.parse_args()
 
     expected_inputs = parse_expected_inputs(args.config)
+    offsets = take_offsets(current_log_paths())
     launch(args.config, args.stem)
-    result = wait_for_result(args.stem, args.from_date, args.to_date, args.timeout, expected_inputs)
+    result = wait_for_result(args.stem, args.from_date, args.to_date, args.timeout, expected_inputs, offsets)
 
     payload = result.to_dict()
     print(json.dumps(payload, ensure_ascii=True))

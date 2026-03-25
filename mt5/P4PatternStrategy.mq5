@@ -58,6 +58,25 @@ input int InpP1P2AValueTimeMinKNumberLimit = 5;
 input double InpBSumValueMinRatioOfAValue = 2.0;
 input double InpBSumValueMaxRatioOfAValue = 5.0;
 input ENUM_TRADE_DIRECTION_MODE InpTradeDirectionMode = LONG_ONLY;
+input bool InpLongEntryDowntrendFilterEnable = false;
+input ENUM_TIMEFRAMES InpLongEntryDowntrendFilterD1TF = PERIOD_D1;
+input int InpLongEntryDowntrendFilterD1FastMAPeriod = 50;
+input int InpLongEntryDowntrendFilterD1SlowMAPeriod = 200;
+input int InpLongEntryDowntrendFilterD1SlopeLookbackBars = 10;
+input int InpLongEntryDowntrendFilterD1SignalShift = 0;
+input bool InpLongEntryDowntrendFilterD1UseCloseBelowSlowMA = false;
+input bool InpLongEntryDowntrendFilterD1UseFastMASlope = false;
+input double InpLongEntryDowntrendFilterD1MinGapRatio = 0.0;
+input double InpLongEntryDowntrendFilterD1MinSlopeRatio = 0.0;
+input bool InpLongEntryDowntrendFilterUseH4Confirm = false;
+input ENUM_TIMEFRAMES InpLongEntryDowntrendFilterH4TF = PERIOD_H4;
+input int InpLongEntryDowntrendFilterH4FastMAPeriod = 50;
+input int InpLongEntryDowntrendFilterH4SlowMAPeriod = 200;
+input int InpLongEntryDowntrendFilterH4SlopeLookbackBars = 8;
+input int InpLongEntryDowntrendFilterH4SignalShift = 0;
+input bool InpLongEntryDowntrendFilterH4UseCloseBelowSlowMA = false;
+input double InpLongEntryDowntrendFilterH4MinGapRatio = 0.0;
+input double InpLongEntryDowntrendFilterH4MinSlopeRatio = 0.0;
 input bool InpPreCondEnable = true;
 input int InpPreCondPriorMoveLookbackBars = 30;
 input double InpPreCondPriorMoveMinRatioOfStructure = 1.1;
@@ -369,6 +388,23 @@ bool ValidateInputs()
       return(false);
      }
 
+   if(InpLongEntryDowntrendFilterD1FastMAPeriod < 1 ||
+      InpLongEntryDowntrendFilterD1SlowMAPeriod < 1 ||
+      InpLongEntryDowntrendFilterD1SlopeLookbackBars < 1 ||
+      InpLongEntryDowntrendFilterD1SignalShift < 0 ||
+      InpLongEntryDowntrendFilterH4FastMAPeriod < 1 ||
+      InpLongEntryDowntrendFilterH4SlowMAPeriod < 1 ||
+      InpLongEntryDowntrendFilterH4SlopeLookbackBars < 1 ||
+      InpLongEntryDowntrendFilterH4SignalShift < 0 ||
+      InpLongEntryDowntrendFilterD1MinGapRatio < 0.0 ||
+      InpLongEntryDowntrendFilterD1MinSlopeRatio < 0.0 ||
+      InpLongEntryDowntrendFilterH4MinGapRatio < 0.0 ||
+      InpLongEntryDowntrendFilterH4MinSlopeRatio < 0.0)
+     {
+      Print("Invalid long-entry downtrend filter parameters.");
+      return(false);
+     }
+
    if(InpP3P4MoveMinRatioOfStructure < 0.0)
      {
       Print("Invalid P3-P4 move ratio threshold.");
@@ -664,6 +700,48 @@ void ProcessSymbol(const string symbol)
    if(CountManagedPositions(symbol) >= InpMaxPositionsPerSymbol)
       return;
 
+   if(match.direction == PATTERN_DIRECTION_LONG)
+     {
+      double d1FastMa = 0.0;
+      double d1SlowMa = 0.0;
+      double d1FastSlopeReferenceMa = 0.0;
+      double d1GapRatio = 0.0;
+      double d1SlopeRatio = 0.0;
+      double h4FastMa = 0.0;
+      double h4SlowMa = 0.0;
+      double h4FastSlopeReferenceMa = 0.0;
+      double h4GapRatio = 0.0;
+      double h4SlopeRatio = 0.0;
+      if(ShouldBlockLongEntryInDowntrend(symbol,
+                                         d1FastMa,
+                                         d1SlowMa,
+                                         d1FastSlopeReferenceMa,
+                                         d1GapRatio,
+                                         d1SlopeRatio,
+                                         h4FastMa,
+                                         h4SlowMa,
+                                         h4FastSlopeReferenceMa,
+                                         h4GapRatio,
+                                         h4SlopeRatio))
+        {
+         if(InpEnableExactSearchCompare)
+            PrintFormat("LONG_DOWNTREND_FILTER_BLOCK symbol=%s p4_bar=%s d1_fast_ema=%.5f d1_slow_ema=%.5f d1_fast_ref=%.5f d1_gap_ratio=%.5f d1_slope_ratio=%.5f h4_fast_ema=%.5f h4_slow_ema=%.5f h4_fast_ref=%.5f h4_gap_ratio=%.5f h4_slope_ratio=%.5f",
+                        symbol,
+                        FormatTime(currentBarTime),
+                        d1FastMa,
+                        d1SlowMa,
+                        d1FastSlopeReferenceMa,
+                        d1GapRatio,
+                        d1SlopeRatio,
+                        h4FastMa,
+                        h4SlowMa,
+                        h4FastSlopeReferenceMa,
+                        h4GapRatio,
+                        h4SlopeRatio);
+         return;
+        }
+     }
+
    ExecuteEntry(g_symbolStates[stateIndex], match);
   }
 
@@ -683,6 +761,244 @@ bool EnsureSymbolReady(const string symbol)
       return(false);
 
    return(true);
+  }
+
+bool ReadMovingAverageValue(const string symbol,
+                            const ENUM_TIMEFRAMES timeframe,
+                            const int period,
+                            const int shift,
+                            double &value)
+  {
+   value = 0.0;
+   const int handle = iMA(symbol, timeframe, period, 0, MODE_EMA, PRICE_CLOSE);
+   if(handle == INVALID_HANDLE)
+      return(false);
+
+   double buffer[];
+   ArrayResize(buffer, 1);
+   const int copied = CopyBuffer(handle, 0, shift, 1, buffer);
+   IndicatorRelease(handle);
+   if(copied != 1)
+      return(false);
+
+   value = buffer[0];
+   return(true);
+  }
+
+bool ReadCloseValue(const string symbol,
+                    const ENUM_TIMEFRAMES timeframe,
+                    const int shift,
+                    double &value)
+  {
+   value = 0.0;
+   double buffer[];
+   ArrayResize(buffer, 1);
+   const int copied = CopyClose(symbol, timeframe, shift, 1, buffer);
+   if(copied != 1)
+      return(false);
+
+   value = buffer[0];
+   return(true);
+  }
+
+bool EvaluateCloseBelowSlowMAFrame(const string symbol,
+                                   const ENUM_TIMEFRAMES timeframe,
+                                   const int fastPeriod,
+                                   const int slowPeriod,
+                                   const int slopeLookbackBars,
+                                   const int signalShift,
+                                   const double minGapRatio,
+                                   const bool useFastMASlope,
+                                   const double minSlopeRatio,
+                                   double &fastMa,
+                                   double &closeValue,
+                                   double &slowMa,
+                                   double &fastSlopeReferenceMa,
+                                   double &gapRatio,
+                                   double &slopeRatio)
+  {
+   fastMa = 0.0;
+   closeValue = 0.0;
+   slowMa = 0.0;
+   fastSlopeReferenceMa = 0.0;
+   gapRatio = 0.0;
+   slopeRatio = 0.0;
+
+   if(!ReadMovingAverageValue(symbol, timeframe, slowPeriod, signalShift, slowMa))
+      return(false);
+
+   if(!ReadCloseValue(symbol, timeframe, signalShift, closeValue))
+      return(false);
+
+   const double safeSlow = MathMax(MathAbs(slowMa), DBL_EPSILON);
+   gapRatio = (slowMa - closeValue) / safeSlow;
+   if(!useFastMASlope)
+      return(closeValue < slowMa &&
+             gapRatio >= minGapRatio);
+
+   if(!ReadMovingAverageValue(symbol, timeframe, fastPeriod, signalShift, fastMa))
+      return(false);
+
+   if(!ReadMovingAverageValue(symbol, timeframe, fastPeriod, signalShift + slopeLookbackBars, fastSlopeReferenceMa))
+      return(false);
+
+   const double safeFast = MathMax(MathAbs(fastMa), DBL_EPSILON);
+   slopeRatio = (fastSlopeReferenceMa - fastMa) / safeFast;
+   return(closeValue < slowMa &&
+          gapRatio >= minGapRatio &&
+          fastMa < fastSlopeReferenceMa &&
+          slopeRatio >= minSlopeRatio);
+  }
+
+bool EvaluateBearishTrendFrame(const string symbol,
+                               const ENUM_TIMEFRAMES timeframe,
+                               const int fastPeriod,
+                               const int slowPeriod,
+                               const int slopeLookbackBars,
+                               const int signalShift,
+                               const double minGapRatio,
+                               const double minSlopeRatio,
+                               double &fastMa,
+                               double &slowMa,
+                               double &fastSlopeReferenceMa,
+                               double &gapRatio,
+                               double &slopeRatio)
+  {
+   fastMa = 0.0;
+   slowMa = 0.0;
+   fastSlopeReferenceMa = 0.0;
+   gapRatio = 0.0;
+   slopeRatio = 0.0;
+
+   if(!ReadMovingAverageValue(symbol, timeframe, fastPeriod, signalShift, fastMa))
+      return(false);
+
+   if(!ReadMovingAverageValue(symbol, timeframe, slowPeriod, signalShift, slowMa))
+      return(false);
+
+   if(!ReadMovingAverageValue(symbol, timeframe, fastPeriod, signalShift + slopeLookbackBars, fastSlopeReferenceMa))
+      return(false);
+
+   const double safeSlow = MathMax(MathAbs(slowMa), DBL_EPSILON);
+   const double safeFast = MathMax(MathAbs(fastMa), DBL_EPSILON);
+   gapRatio = (slowMa - fastMa) / safeSlow;
+   slopeRatio = (fastSlopeReferenceMa - fastMa) / safeFast;
+
+   return(fastMa < slowMa &&
+          fastMa < fastSlopeReferenceMa &&
+          gapRatio >= minGapRatio &&
+          slopeRatio >= minSlopeRatio);
+  }
+
+bool ShouldBlockLongEntryInDowntrend(const string symbol,
+                                     double &d1FastMa,
+                                     double &d1SlowMa,
+                                     double &d1FastSlopeReferenceMa,
+                                     double &d1GapRatio,
+                                     double &d1SlopeRatio,
+                                     double &h4FastMa,
+                                     double &h4SlowMa,
+                                     double &h4FastSlopeReferenceMa,
+                                     double &h4GapRatio,
+                                     double &h4SlopeRatio)
+  {
+   d1FastMa = 0.0;
+   d1SlowMa = 0.0;
+   d1FastSlopeReferenceMa = 0.0;
+   d1GapRatio = 0.0;
+   d1SlopeRatio = 0.0;
+   h4FastMa = 0.0;
+   h4SlowMa = 0.0;
+   h4FastSlopeReferenceMa = 0.0;
+   h4GapRatio = 0.0;
+   h4SlopeRatio = 0.0;
+
+   if(!InpLongEntryDowntrendFilterEnable)
+      return(false);
+
+   bool d1Bearish = false;
+   if(InpLongEntryDowntrendFilterD1UseCloseBelowSlowMA)
+     {
+      double d1Close = 0.0;
+      d1Bearish = EvaluateCloseBelowSlowMAFrame(symbol,
+                                                InpLongEntryDowntrendFilterD1TF,
+                                                InpLongEntryDowntrendFilterD1FastMAPeriod,
+                                                InpLongEntryDowntrendFilterD1SlowMAPeriod,
+                                                InpLongEntryDowntrendFilterD1SlopeLookbackBars,
+                                                InpLongEntryDowntrendFilterD1SignalShift,
+                                                InpLongEntryDowntrendFilterD1MinGapRatio,
+                                                InpLongEntryDowntrendFilterD1UseFastMASlope,
+                                                InpLongEntryDowntrendFilterD1MinSlopeRatio,
+                                                d1FastMa,
+                                                d1Close,
+                                                d1SlowMa,
+                                                d1FastSlopeReferenceMa,
+                                                d1GapRatio,
+                                                d1SlopeRatio);
+      if(!d1Bearish && (d1SlowMa == 0.0 && d1GapRatio == 0.0))
+         return(false);
+      if(!InpLongEntryDowntrendFilterD1UseFastMASlope)
+        {
+         d1FastMa = d1Close;
+         d1FastSlopeReferenceMa = d1Close;
+         d1SlopeRatio = 0.0;
+        }
+     }
+   else
+     {
+      d1Bearish = EvaluateBearishTrendFrame(symbol,
+                                            InpLongEntryDowntrendFilterD1TF,
+                                            InpLongEntryDowntrendFilterD1FastMAPeriod,
+                                            InpLongEntryDowntrendFilterD1SlowMAPeriod,
+                                            InpLongEntryDowntrendFilterD1SlopeLookbackBars,
+                                            InpLongEntryDowntrendFilterD1SignalShift,
+                                            InpLongEntryDowntrendFilterD1MinGapRatio,
+                                            InpLongEntryDowntrendFilterD1MinSlopeRatio,
+                                            d1FastMa,
+                                            d1SlowMa,
+                                            d1FastSlopeReferenceMa,
+                                            d1GapRatio,
+                                            d1SlopeRatio);
+     }
+
+   if(!d1Bearish)
+      return(false);
+
+   if(!InpLongEntryDowntrendFilterUseH4Confirm)
+      return(true);
+
+   if(InpLongEntryDowntrendFilterH4UseCloseBelowSlowMA)
+     {
+      return(EvaluateCloseBelowSlowMAFrame(symbol,
+                                           InpLongEntryDowntrendFilterH4TF,
+                                           InpLongEntryDowntrendFilterH4FastMAPeriod,
+                                           InpLongEntryDowntrendFilterH4SlowMAPeriod,
+                                           InpLongEntryDowntrendFilterH4SlopeLookbackBars,
+                                           InpLongEntryDowntrendFilterH4SignalShift,
+                                           InpLongEntryDowntrendFilterH4MinGapRatio,
+                                           false,
+                                           0.0,
+                                           h4FastMa,
+                                           h4FastMa,
+                                           h4SlowMa,
+                                           h4FastSlopeReferenceMa,
+                                           h4GapRatio,
+                                           h4SlopeRatio));
+     }
+
+   return(EvaluateBearishTrendFrame(symbol,
+                                    InpLongEntryDowntrendFilterH4TF,
+                                    InpLongEntryDowntrendFilterH4FastMAPeriod,
+                                    InpLongEntryDowntrendFilterH4SlowMAPeriod,
+                                    InpLongEntryDowntrendFilterH4SlopeLookbackBars,
+                                    InpLongEntryDowntrendFilterH4SignalShift,
+                                    InpLongEntryDowntrendFilterH4MinGapRatio,
+                                    InpLongEntryDowntrendFilterH4MinSlopeRatio,
+                                    h4FastMa,
+                                    h4SlowMa,
+                                    h4FastSlopeReferenceMa,
+                                    h4GapRatio,
+                                    h4SlopeRatio));
   }
 
 int FindSymbolState(const string symbol)
