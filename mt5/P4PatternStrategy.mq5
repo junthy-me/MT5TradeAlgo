@@ -53,7 +53,7 @@ input double InpCondAXMin = 0.75;
 input double InpCondAXMax = 1.25;
 input double InpP3P4MoveMinRatioOfStructure = 0.75;
 input double InpCondCZ = 1.0;
-input double InpP1P2AValueSpaceMinPriceLimit = 5.0;
+input double InpP1P2AValueSpaceMinPriceLimit = 0.0;
 input int InpP1P2AValueTimeMinKNumberLimit = 5;
 input double InpBSumValueMinRatioOfAValue = 2.0;
 input double InpBSumValueMaxRatioOfAValue = 5.0;
@@ -64,7 +64,7 @@ input double InpPreCondPriorMoveMinRatioOfStructure = 1.1;
 input int InpPreCondPriorMoveMinBarsBetweenPre0AndP0 = 0;
 input string InpRequiredSwingExtremaSegments_Pre0P0_P0P1_P1P2_P2P3_P3P4 = "true,true,false,false,false";
 
-input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.55;
+input double InpP5P6ReboundMinRatioOfP3P5Drop = 0.618;
 input double InpSoftLossC = 1.0;
 input double InpP5AnchoredProfitC = 2.0;
 input bool InpEnableExactSearchCompare = false;
@@ -377,7 +377,7 @@ bool ValidateInputs()
 
    if(InpP1P2AValueSpaceMinPriceLimit < 0.0)
      {
-      Print("Invalid P1-P2 a-value minimum price threshold.");
+      Print("Invalid P1-P2 a-value minimum price threshold. Use 0 for auto mode or a positive manual override.");
       return(false);
      }
 
@@ -430,6 +430,17 @@ bool ValidateInputs()
      }
 
    return(true);
+  }
+
+double ResolveP1P2AValueSpaceMinPriceLimit(const double entryPrice)
+  {
+   if(InpP1P2AValueSpaceMinPriceLimit > 0.0)
+      return(InpP1P2AValueSpaceMinPriceLimit);
+
+   if(entryPrice <= 0.0)
+      return(0.0);
+
+   return(MathCeil(entryPrice / 1000.0));
   }
 
 bool ParseSymbols()
@@ -2017,7 +2028,6 @@ bool BuildHistoricalBackbone(const string symbol,
    const bool preconditionsPassed = EvaluatePatternPreconditions(rates, pattern);
    if(!(pattern.condA &&
         pattern.condF &&
-        pattern.a >= InpP1P2AValueSpaceMinPriceLimit &&
         p1p2BarCount >= InpP1P2AValueTimeMinKNumberLimit &&
         preconditionsPassed))
       return(false);
@@ -2170,7 +2180,7 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
 
    pattern.condB = pattern.r1 >= InpP3P4MoveMinRatioOfStructure;
    pattern.condC = pattern.t[3] < (InpCondCZ * (pattern.t[0] + pattern.t[1] + pattern.t[2]));
-   pattern.condD = true;
+   pattern.condD = pattern.a >= ResolveP1P2AValueSpaceMinPriceLimit(pattern.pointPrices[4]);
 
    if(IsSwingExtremaSegmentEnabled(SWING_EXTREMA_SEGMENT_P3P4))
      {
@@ -2214,7 +2224,7 @@ bool EvaluateRealtimePatternFromBackbone(const PatternSnapshot &backbone,
                      p34SegmentExtrema);
      }
 
-   if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condF))
+   if(!(pattern.condA && pattern.condB && pattern.condC && pattern.condD && pattern.condF))
      {
       ResetPattern(pattern);
       return(false);

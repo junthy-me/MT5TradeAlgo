@@ -240,7 +240,7 @@
 | --- | --- | --- | --- |
 | `InpCondAXMin` | `0.75` | `CondA` 下限 | 要求 `b1 / b2 >= InpCondAXMin` |
 | `InpCondAXMax` | `1.25` | `CondA` 上限 | 要求 `b1 / b2 <= InpCondAXMax` |
-| `InpP1P2AValueSpaceMinPriceLimit` | `5.0` | `a` 的最小价格幅度 | 要求 `a >= 该值` |
+| `InpP1P2AValueSpaceMinPriceLimit` | `0.0` | `a` 的最小价格幅度 | 若 > 0.0 则要求 `a >= 该值`，否则要求 a >= mathceil(入场价/1000) |
 | `InpP1P2AValueTimeMinKNumberLimit` | `5` | `P1->P2` 最小总 K 线数 | 要求 `pointSpans[1] + 2 >= 该值` |
 | `InpBSumValueMinRatioOfAValue` | `2.0` | `b1+b2` 相对 `a` 的最小倍数 | 要求 `b1+b2 >= 该值 * a` |
 | `InpBSumValueMaxRatioOfAValue` | `5.0` | `b1+b2` 相对 `a` 的最大倍数 | 要求 `b1+b2 <= 该值 * a` |
@@ -256,7 +256,7 @@
 | --- | --- | --- | --- |
 | `InpP3P4MoveMinRatioOfStructure` | `0.75` | `CondB` 阈值 | 要求 `c / (a+b1+b2) >= 该值` |
 | `InpCondCZ` | `1.0` | `CondC` 系数 | 要求 `t4 < 该值 * (t1+t2+t3)` |
-| `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.55` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
+| `InpP5P6ReboundMinRatioOfP3P5Drop` | `0.618` | 弱止损激活阈值 | 要求 `e >= 该值 * (c+d)` |
 | `InpSoftLossC` | `1.0` | 弱止损价系数 | `softLossPrice = 该值 * selectedP5` |
 | `InpP5AnchoredProfitC` | `2.0` | 唯一止盈系数 | 首次 `P5/P6` 激活后，多头加到 `selectedP5`，空头从 `selectedP5` 向下减去 |
 | `InpEnableExactSearchCompare` | `false` | 调试开关 | 打开后会对比缓存搜索和精确搜索结果，仅用于诊断 |
